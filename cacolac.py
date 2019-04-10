@@ -243,6 +243,18 @@ class ParticleAdvector:
         spline = interp1d(theta, vphi * ifreq)
         self._int_phi = spline.antiderivative()
 
+        # Compute full-bounce quantities
+        bounce_time = abs(self._int_time(np.pi))
+        bounce_phi  = abs(self._int_phi (np.pi))
+
+        # Add the mirror part for trapped particles
+        trapped = self._trapped
+        bounce_time[trapped, :] += bounce_time[trapped, :].sum(axis=-1, keepdims=True)
+        bounce_phi [trapped, :] += bounce_phi [trapped, :].sum(axis=-1, keepdims=True)
+
+        self._bounce_time = bounce_time
+        self._bounce_phi  = bounce_phi
+
     @property
     def ifreq(self):
         return self._ifreq
@@ -256,8 +268,16 @@ class ParticleAdvector:
         return self._int_time
 
     @property
+    def bounce_time(self):
+        return self._bounce_time
+
+    @property
     def phi_path(self):
         return self._int_phi
+
+    @property
+    def bounce_phi(self):
+        return self._bounce_phi
 
     @property
     def trapped(self):
@@ -420,6 +440,19 @@ class KernelComputer:
                 gyroavg=gyroavg,
             )
 
+            # Fourier-space time-periodicity
+            bounce_dist = (
+                + 1j * np.multiply.outer(omega, adv.bounce_time)
+                + 1j * np.multiply.outer(ntor, adv.bounce_phi)
+            )
+            bounce_warp = - np.expm1(1j * bounce_dist)
+            np.reciprocal(bounce_warp, out=bounce_warp)
+            #assert np.all(np.isfinite(warp))
+
+            # Distribution function
+            bounce_warp *= FonT
+            #assert np.all(np.isfinite(warp))
+
             # Loop over the present position
 #             for j2 in range(theta_grid.size):
 #                 print('THETA', j1, j2)
@@ -448,20 +481,19 @@ class KernelComputer:
                 )
 
                 # Fourier-space displacement
-                warp  = (
+                dist = (
                     - np.multiply.outer(omega, tim2 - tim1)
-                    + np.multiply.outer(ntor, phi2 - phi1)
+                    + np.multiply.outer(ntor,  phi2 - phi1)
                 )[:, :, :, mask]
-                warp  = np.exp(1j * warp)
-
-                # FIXME Add trapped particles
+                warp = np.exp(1j * dist)
                 np.who(locals())
                 trapped = adv.trapped[
                     np.any(mask, axis=-1)
                 ]
 
-                # Fourier-space time-periodicity
-                # FIXME
+                # Common part
+                warp *= bounce_warp[:, :, np.newaxis, mask]
+                #assert np.all(np.isfinite(warp))
 
                 # Jacobian for theta integral
                 warp *= adv.ifreq(theta2)[:, mask]
