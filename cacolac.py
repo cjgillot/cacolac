@@ -358,6 +358,154 @@ class make_interp_kernel:
 
         return i_max - i_min, np.s_[i_min:i_max]
 
+class KernelElementComputer:
+    def __init__(self, grid, computer, adv, theta1, gyroavg):
+        self._grid      = grid
+        self._computer  = computer
+        self._adv       = adv
+        self._gyroavg   = gyroavg
+
+        self._omega, self._ntor = np.meshgrid(
+            computer._omega, computer._ntor,
+            indexing='ij', sparse=True,
+        )
+        self._theta1    = theta1
+        self._psi_path  = interp1d(grid.theta.squeeze(), adv.psi_path)
+        self._phi_path  = adv.phi_path
+        self._time_path = adv.time_path
+
+    def precompute(self):
+        c = self._computer
+        a = self._adv
+
+        # Interpolation path at past position
+        psi1 = self._psi_path (self._theta1)
+        phi1 = self._phi_path (self._theta1)
+        tim1 = self._time_path(self._theta1)
+        self._phi1 = phi1
+        self._tim1 = tim1
+
+        # Interpolate past position
+        self._past_kernel = make_interp_kernel(
+            c._psi, psi1,
+            c._theta, self._theta1,
+            with_deriv=True,
+            gyroavg=self._gyroavg,
+        )
+
+        # Fourier-space time-periodicity
+        bounce_dist = (
+            + 1j * np.multiply.outer(self._omega, a.bounce_time)
+            + 1j * np.multiply.outer(self._ntor,  a.bounce_phi)
+        )
+        bounce_warp = - np.expm1(1j * bounce_dist)
+        np.reciprocal(bounce_warp, out=bounce_warp)
+        #assert np.all(np.isfinite(warp))
+
+        # Distribution function
+        bounce_warp *= c._FonT
+        #assert np.all(np.isfinite(warp))
+
+        # Jacobian for theta integral
+        bounce_warp *= a.ifreq(self._theta1)
+
+        self._bounce_warp = bounce_warp
+
+    def compute_passing(self, output):
+        c = self._computer
+        a = self._adv
+
+        # Interpolation path at present position
+        theta2 = c._theta
+        psi2 = self._psi_path (theta2)
+        phi2 = self._phi_path (theta2) - self._phi1
+        tim2 = self._time_path(theta2) - self._tim1
+
+        # Adjust in case the causality is wrong
+        uncausal = tim2 < 0
+        tim2 += uncausal * a.bounce_time
+        phi2 += uncausal * a.bounce_phi
+        assert np.all(tim2 >= 0)
+        del uncausal
+
+        # Compute relevant particles
+        mask = np.any(self._past_kernel.val_ker, axis=(0, 1))
+
+        # Fourier-space displacement
+        dist = (
+            - np.multiply.outer(self._omega, tim2)
+            + np.multiply.outer(self._ntor,  phi2)
+        )[:, :, :, mask]
+        warp = np.exp(1j * dist)
+        #assert np.all(np.isfinite(warp))
+
+        # Common part
+        warp *= self._bounce_warp[:, :, np.newaxis, mask]
+        #assert np.all(np.isfinite(warp))
+
+        # Interpolate present point
+        present_kernel = make_interp_kernel(
+            c._psi, psi2[:, mask],
+            c._theta, theta2,
+            with_deriv=False,
+            gyroavg=self._gyroavg,
+        )
+
+        # Sum everything
+        self.add_contribution(present_kernel, warp, mask, output)
+
+    def add_contribution(self, present_kernel, warp, mask, output):
+        c = self._computer
+        past_kernel = self._past_kernel
+
+        # Contribution
+        print('ES')
+        source = np.zeros((
+            self._omega.size, self._ntor.size,
+            past_kernel.psi_size, present_kernel.psi_size,
+            past_kernel.theta_size, present_kernel.theta_size,
+        ), dtype=np.complex128)
+        np.who(locals())
+
+        # Entropic frequency
+        freq_star = c._freq_star
+
+#         print('ES 0')
+#         source += np.einsum(
+#             'wn...p,p,yhp,zj...p->wnyzhj',
+#             warp, freq_star[0][mask],
+#             past_kernel.dpsi_ker[:, :, mask],
+#             present_kernel.val_ker,
+#             optimize=True,
+#         )
+
+#         print('ES 1')
+#         source += np.einsum(
+#             'wn...p,p,yhp,zj...p->wnyzhj',
+#             warp, freq_star[1][mask],
+#             past_kernel.dtheta_ker[:, :, mask],
+#             present_kernel.val_ker,
+#             optimize=True,
+#         )
+
+        print('ES 2')
+        source += np.einsum(
+            'wn...p,p,n,yhp,zj...p->wnyzhj',
+            warp, freq_star[2][mask],
+            1j * self._ntor.squeeze(),
+            past_kernel.val_ker[:, :, mask],
+            present_kernel.val_ker,
+            optimize=True,
+        )
+        #assert np.all(np.isfinite(source))
+
+        print('ACC')
+        output[
+            :, :,
+            past_kernel.psi_slice, present_kernel.psi_slice,
+            past_kernel.theta_slice, present_kernel.theta_slice
+        ] += source
+
 class KernelComputer:
     def __init__(self, grid, Neq, Teq, omega, ntor, psi=None, theta=None, Veq=None):
         self._grid = grid
@@ -412,145 +560,16 @@ class KernelComputer:
         ]
 
     def compute(self, adv, gyroavg=False):
-        # Prepare grid
-        g = self._grid
-        psi_grid = self._psi
-        theta_grid = self._theta
-        omega, ntor = np.meshgrid(
-            self._omega, self._ntor,
-            indexing='ij', sparse=True,
-        )
-
-        # Background and entropic frequency
-        FonT = self._FonT
-        freq_star = self._freq_star
-
-        # Interpolation path
-        psi_path = interp1d(g.theta.squeeze(), adv.psi_path)
-        time_path = adv.time_path
-        phi_path = adv.phi_path
-
         # Loop over the past position
-        for j1 in range(theta_grid.size):
-            theta1 = theta_grid[j1]
-            psi1 = psi_path(theta1)
-            tim1 = time_path(theta1)
-            phi1 = phi_path(theta1)
+        for theta1 in self._theta:
+            kec = KernelElementComputer(self._grid, self, adv, theta1, gyroavg)
 
-            # Interpolate past position
-            past_kernel = make_interp_kernel(
-                psi_grid, psi1,
-                theta_grid, theta1,
-                with_deriv=True,
-                gyroavg=gyroavg,
-            )
+            # Precompute effects of past particle
+            kec.precompute()
 
-            # Fourier-space time-periodicity
-            bounce_dist = (
-                + 1j * np.multiply.outer(omega, adv.bounce_time)
-                + 1j * np.multiply.outer(ntor, adv.bounce_phi)
-            )
-            bounce_warp = - np.expm1(1j * bounce_dist)
-            np.reciprocal(bounce_warp, out=bounce_warp)
-            #assert np.all(np.isfinite(warp))
+            # Add passing particles
+            kec.compute_passing(self._output)
 
-            # Distribution function
-            bounce_warp *= FonT
-            #assert np.all(np.isfinite(warp))
-
-            # Loop over the present position
-#             for j2 in range(theta_grid.size):
-#                 print('THETA', j1, j2)
-#                 theta2 = theta[j2]
-            if True:
-                print('THETA', j1)
-                theta2 = theta_grid
-                psi2 = psi_path(theta2)
-                tim2 = time_path(theta2)
-                phi2 = phi_path(theta2)
-
-                # Compute relevant particles
-                mask  = tim2 <= tim1
-                mask &= np.any(past_kernel.val_ker, axis=(0, 1))
-#                 mask &= np.any(present_kernel.val_ker, axis=(0, 1))
-                mask  = np.any(mask, axis=0)
-                print(mask.shape, np.sum(mask))
-                np.who(locals())
-
-                # Interpolate present point
-                present_kernel = make_interp_kernel(
-                    psi_grid, psi2[:, mask],
-                    theta_grid, theta2,
-                    with_deriv=False,
-                    gyroavg=gyroavg,
-                )
-
-                # Fourier-space displacement
-                dist = (
-                    - np.multiply.outer(omega, tim2 - tim1)
-                    + np.multiply.outer(ntor,  phi2 - phi1)
-                )[:, :, :, mask]
-                warp = np.exp(1j * dist)
-                np.who(locals())
-                trapped = adv.trapped[
-                    np.any(mask, axis=-1)
-                ]
-
-                # Common part
-                warp *= bounce_warp[:, :, np.newaxis, mask]
-                #assert np.all(np.isfinite(warp))
-
-                # Jacobian for theta integral
-                warp *= adv.ifreq(theta2)[:, mask]
-#                 warp[:, :, tim2 > tim1] = 0
-
-                # Distribution function
-                warp *= FonT[mask]
-                assert np.all(np.isfinite(warp))
-
-                # Contribution
-                print('ES')
-                source = np.zeros((
-                    omega.size, ntor.size,
-                    past_kernel.psi_size, present_kernel.psi_size,
-                    past_kernel.theta_size, present_kernel.theta_size,
-                ), dtype=np.complex128)
-                np.who(locals())
-
-#                 print('ES 0')
-#                 source += np.einsum(
-#                     'wn...p,p,yhp,zj...p->wnyzhj',
-#                     warp, freq_star[0][mask],
-#                     past_kernel.dpsi_ker[:, :, mask],
-#                     present_kernel.val_ker,
-#                     optimize=True,
-#                 )
-
-#                 print('ES 1')
-#                 source += np.einsum(
-#                     'wn...p,p,yhp,zj...p->wnyzhj',
-#                     warp, freq_star[1][mask],
-#                     past_kernel.dtheta_ker[:, :, mask],
-#                     present_kernel.val_ker,
-#                     optimize=True,
-#                 )
-
-                print('ES 2')
-                source += np.einsum(
-                    'wn...p,p,n,yhp,zj...p->wnyzhj',
-                    warp, freq_star[2][mask],
-                    1j * ntor.squeeze(),
-                    past_kernel.val_ker[:, :, mask],
-                    present_kernel.val_ker,
-                    optimize=True,
-                )
-
-                print('ACC')
-                self._output[
-                    :, :,
-                    past_kernel.psi_slice, present_kernel.psi_slice,
-                    past_kernel.theta_slice, present_kernel.theta_slice
-                ] += source
             return
 
 def main():
