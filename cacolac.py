@@ -1,9 +1,4 @@
 
-# coding: utf-8
-
-# In[1]:
-
-
 import importlib
 
 import numpy as np
@@ -12,13 +7,22 @@ from scipy.interpolate import make_interp_spline as interp1d
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-#get_ipython().run_line_magic('matplotlib', 'inline')
+# %matplotlib inline
 
 mpl.rcParams['figure.figsize'] = 10, 5
 
-
-# In[2]:
-
+def meshgrid(*xi):
+    xi = [np.asanyarray(_) for _ in xi]
+    ns = [_.ndim for _ in xi]
+    ll = len(ns)
+    for i, n in enumerate(ns):
+        sl = (Ellipsis,) + n * (None,)
+        for j in range(i):
+            xi[j] = xi[j][sl]
+        sl = n * (None,) + (Ellipsis,)
+        for j in range(i+1, ll):
+            xi[j] = xi[j][sl]
+    return xi
 
 class Grid:
     def __init__(self, As, Zs, R0, rg, qq, theta, vpar, mu):
@@ -28,11 +32,8 @@ class Grid:
 
         psi = interp1d(rg, rg/qq).antiderivative()
         psi = psi(rg)
-        theta, psi, vpar, mu = np.meshgrid(
-            theta, psi, vpar, mu,
-            indexing='ij', sparse=True,
-        )
-        rg = rg[np.newaxis, :, np.newaxis, np.newaxis]
+        theta, psi, mu, vpar, = meshgrid(theta, psi, mu, vpar)
+        rg = rg.reshape(psi.shape)
         Rred = 1 + rg/R0 * np.cos(theta)
         ltor = - Zs * psi + As * R0 * Rred * vpar
 
@@ -103,10 +104,6 @@ class Grid:
     def qprofile_at(self, y):
         return self._q_at(y)
 
-
-# In[49]:
-
-
 class ParticleAdvector:
     def __init__(self, grid, pot):
         self._grid = grid
@@ -133,10 +130,12 @@ class ParticleAdvector:
         r    = g.radius
         Rred = 1 + r/R0
 
-        ener = g.vpar**2 + 2/A * g.mu + 2*Z/A * P(psi)
+        ener = g.vpar**2 + 2/A * g.mu / (1 + r / R0) + 2*Z/A * P(psi)
         ltor = psi - A/Z * R0 * Rred * vpar
 
         shape = np.broadcast(psi, g.theta, g.mu, vpar).shape
+
+        np.who(locals())
 
         for _ in range(3):
             print('LOOP', _)
@@ -155,7 +154,8 @@ class ParticleAdvector:
                 jac = np.zeros(shape + (2, 2))
                 jac[..., 0, 0] = 1 - A/Z * np.cos(g.theta) * vpar
                 jac[..., 0, 1] = - A/Z * R0 * Rred
-                jac[..., 1, 0] = - 2/A/R0 * g.mu * (np.cos(g.theta) / Rred**2)                                 + 2*Z/A * P(psi, nu=1)
+                jac[..., 1, 0] = - 2/A/R0 * g.mu * (np.cos(g.theta) / Rred**2)\
+                                 + 2*Z/A * P(psi, nu=1)
                 jac[..., 1, 1] = 2 * g.vpar
 
                 diff = np.linalg.solve(jac, err)
@@ -169,11 +169,18 @@ class ParticleAdvector:
                 print('LOOP v', _)
                 psi = ltor + A/Z * R0 * Rred * vpar
 
-                trapped = np.any(vpar == 0, axis=1, keepdims=True)
+                trapped = np.any(vpar == 0, axis=0) & g.mu[0].astype(bool)
 
-                # Remove average for passing particles
-                avg_psi = psi.mean(axis=1, keepdims=True) - g.psi
-                psi -= (~trapped) * avg_psi
+                # Anchor at slowest position.
+                # This allows to have the same anchor the two sides of a trapped particle,
+                # while controlling the error for passing particles.
+                avg_psi = np.take_along_axis(
+                    psi,
+                    np.argmin(abs(vpar), axis=0)[np.newaxis],
+                    axis=0,
+                )
+                psi -= avg_psi
+                psi += g.psi
 
 #             try:
 #                 plt.subplot(121)
@@ -194,12 +201,16 @@ class ParticleAdvector:
             if np.allclose(vpar_old, vpar) and np.allclose(psi_old, psi):
                 break
 
+        assert np.all(np.isfinite(psi))
+        assert np.all(np.isfinite(r))
+        assert np.all(np.isfinite(vpar))
         self._psi = psi
         self._r = r
         self._vpar = vpar
         self._Rred = Rred
 
-        self._trapped = np.any(vpar == 0, axis=1, keepdims=True)
+        trapped = np.any(vpar == 0, axis=0, keepdims=True) & g.mu.astype(bool)
+        self._trapped = trapped.squeeze()
 
     def compute_freq(self):
         g = self._grid
@@ -214,9 +225,8 @@ class ParticleAdvector:
 
         ifreq = 1/freq
         ifreq[~np.isfinite(ifreq)] = 0
-        self._ifreq = ifreq
-        spline = interp1d(theta, ifreq)
-        self._int_time = spline.antiderivative()
+        self._ifreq = interp1d(theta, ifreq)
+        self._int_time = self._ifreq.antiderivative()
 
         vphi  = self._vpar / self._Rred / g.R0
         # FIXME Add vE.gradphi
@@ -242,9 +252,9 @@ class ParticleAdvector:
     def phi_path(self):
         return self._int_phi
 
-
-# In[112]:
-
+    @property
+    def trapped(self):
+        return self._trapped
 
 class make_interp_kernel:
     def __init__(
@@ -254,13 +264,15 @@ class make_interp_kernel:
         with_deriv=False,
         gyroavg=False,
     ):
-        if np.ndim(theta) != 0:
-            theta = theta[:, np.newaxis, np.newaxis, np.newaxis]
-        else:
-            theta = np.atleast_3d(theta)
+        psi, theta = self._adjust_points(psi, theta)
         self.psi_size, self.psi_slice = self._choose_slice(psi_grid, psi)
         self.theta_size, self.theta_slice = self._choose_slice(theta_grid, theta)
 
+        print('INTERP', (
+            self.psi_size,
+            self.theta_size,
+            *psi.shape
+        ))
         self.val_ker = np.zeros((
             self.psi_size,
             self.theta_size,
@@ -275,6 +287,8 @@ class make_interp_kernel:
             theta_grid[self.theta_slice],
             indexing='ij', sparse=True,
         )
+
+#         np.who(locals())
 
         # Gaussian interpolation in psi
         dpsi = np.diff(psi_loc.squeeze()).mean()
@@ -291,14 +305,18 @@ class make_interp_kernel:
         dtheta = np.diff(theta_loc.squeeze()).mean()
         theta_dist = np.subtract.outer(theta_loc, theta)
         sinc = np.exp(- theta_dist**2 / dtheta**2)
-        np.who(locals())
-        np.who(self.__dict__)
 
         self.val_ker *= sinc
         if with_deriv:
             self.dpsi_ker *= sinc
             self.dtheta_ker *= sinc
             self.dtheta_ker *= - 2 * theta_dist / dtheta**2
+
+    def _adjust_points(self, psi, theta):
+        psi = np.asanyarray(psi); n = psi.ndim
+        theta = np.asanyarray(theta); m = theta.ndim
+        theta = theta[(Ellipsis,) + (n - m) * (None,)]
+        return psi, theta
 
     def _choose_slice(self, grid, values):
         i_min = grid.searchsorted(values.min(), 'left') - 1
@@ -307,10 +325,6 @@ class make_interp_kernel:
         i_max = min(i_max, grid.size)
 
         return i_max - i_min, np.s_[i_min:i_max]
-
-
-# In[177]:
-
 
 class KernelComputer:
     def __init__(self, grid, Neq, Teq, omega, ntor, psi=None, theta=None, Veq=None):
@@ -325,10 +339,11 @@ class KernelComputer:
         self._theta = np.atleast_1d(theta)
         self._ntor  = np.atleast_1d(ntor)
 
-        self._Neq = Neq[:, np.newaxis, np.newaxis]
-        self._Teq = Teq[:, np.newaxis, np.newaxis]
+        sl = (Ellipsis,) + (grid.energy.ndim - 2) * (None,)
+        self._Neq = Neq[sl]
+        self._Teq = Teq[sl]
         if Veq is not None:
-            self._Veq = Veq[:, np.newaxis, np.newaxis]
+            self._Veq = Veq[sl]
         else:
             self._Veq = None
 
@@ -348,9 +363,8 @@ class KernelComputer:
         Veq = self._Veq
 
         # Distribution function
-        Feq = np.zeros((
-            g.psi.size, g.vpar.size, g.mu.size,
-        ))
+        Feq = np.zeros(np.broadcast(g.psi, g.vpar, g.mu).shape[1:])
+        print(Feq.shape, g.psi.shape)
         Feq *= np.exp(- g.energy.squeeze()/Teq)
         if Veq is not None:
             Feq *= np.exp(g.ltor * Veq/Teq)
@@ -366,33 +380,32 @@ class KernelComputer:
         ]
 
     def compute(self, adv, gyroavg=False):
+        # Prepare grid
         g = self._grid
         psi_grid = self._psi
         theta_grid = self._theta
-
-        # Background and entropic frequency
-        FonT = self._FonT
-        freq_star = self._freq_star
-
-        # Interpolate path
-        psi_path  = interp1d(g.theta.squeeze(), adv.psi_path)
-        time_path = adv.time_path
-        phi_path  = adv.phi_path
-
-        # Prepare grid
         omega, ntor = np.meshgrid(
             self._omega, self._ntor,
             indexing='ij', sparse=True,
         )
 
+        # Background and entropic frequency
+        FonT = self._FonT
+        freq_star = self._freq_star
+
+        # Interpolation path
+        psi_path = interp1d(g.theta.squeeze(), adv.psi_path)
+        time_path = adv.time_path
+        phi_path = adv.phi_path
+
         # Loop over the past position
-        for j1 in range(3):#theta_grid.size):
+        for j1 in range(theta_grid.size):
             theta1 = theta_grid[j1]
             psi1 = psi_path(theta1)
             tim1 = time_path(theta1)
             phi1 = phi_path(theta1)
 
-            # Interpolation
+            # Interpolate past position
             past_kernel = make_interp_kernel(
                 psi_grid, psi1,
                 theta_grid, theta1,
@@ -401,79 +414,98 @@ class KernelComputer:
             )
 
             # Loop over the present position
+#             for j2 in range(theta_grid.size):
+#                 print('THETA', j1, j2)
+#                 theta2 = theta[j2]
             if True:
                 print('THETA', j1)
-                theta2 = theta_grid.squeeze()
-            #for j2 in range(theta_grid.size):
-            #    print('THETA', j1, j2)
-            #    theta2 = theta_grid[j2]
-                psi2       = psi_path(theta2)
-                time_shift = time_path(theta2) - tim1
-                phi_shift  = phi_path (theta2) - phi1
+                theta2 = theta_grid
+                psi2 = psi_path(theta2)
+                tim2 = time_path(theta2)
+                phi2 = phi_path(theta2)
 
-                # Interpolation
+                # Compute relevant particles
+                mask  = tim2 <= tim1
+                mask &= np.any(past_kernel.val_ker, axis=(0, 1))
+#                 mask &= np.any(present_kernel.val_ker, axis=(0, 1))
+                mask  = np.any(mask, axis=0)
+                print(mask.shape, np.sum(mask))
+                np.who(locals())
+
+                # Interpolate present point
                 present_kernel = make_interp_kernel(
-                    psi_grid, psi2,
+                    psi_grid, psi2[:, mask],
                     theta_grid, theta2,
                     with_deriv=False,
                     gyroavg=gyroavg,
                 )
-                np.who(locals())
 
                 # Fourier-space displacement
                 warp  = (
-                    - np.multiply.outer(omega, time_shift)
-                    + np.multiply.outer(ntor, phi_shift)
-                )
+                    - np.multiply.outer(omega, tim2 - tim1)
+                    + np.multiply.outer(ntor, phi2 - phi1)
+                )[:, :, :, mask]
                 warp  = np.exp(1j * warp)
-                warp *= adv.ifreq[j1]
 
-                #warp = warp[np.newaxis, np.newaxis, :] * (time_shift <= 0)
-                warp[:, :, time_shift > 0] = 0
-                print('WARP')
+                # FIXME Add trapped particles
+                np.who(locals())
+                trapped = adv.trapped[mask]
+
+                # Fourier-space time-periodicity
+                # FIXME
+
+                # Jacobian for theta integral
+                warp *= adv.ifreq(theta2)[:, mask]
+#                 warp[:, :, tim2 > tim1] = 0
+
+                # Distribution function
+                warp *= FonT[mask]
+                assert np.all(np.isfinite(warp))
 
                 # Contribution
+                print('ES')
                 source = np.zeros((
                     omega.size, ntor.size,
                     past_kernel.psi_size, present_kernel.psi_size,
                     past_kernel.theta_size, present_kernel.theta_size,
                 ), dtype=np.complex128)
-                print('ES')
+                np.who(locals())
 
-                #source += np.einsum(
-                #    'wn...lvm,lvm,lvm,yhlvm,zj...lvm->wnyzhj',
-                #    warp, FonT, freq_star[0],
-                #    past_kernel.dpsi_ker, present_kernel.val_ker,
-                #    optimize='optimal',
-                #)
-                #print('ES 0')
+#                 print('ES 0')
+#                 source += np.einsum(
+#                     'wn...p,p,yhp,zj...p->wnyzhj',
+#                     warp, freq_star[0][mask],
+#                     past_kernel.dpsi_ker[:, :, mask],
+#                     present_kernel.val_ker,
+#                     optimize=True,
+#                 )
 
-                #source += np.einsum(
-                #    'wn...lvm,lvm,lvm,yhlvm,zj...lvm->wnyzhj',
-                #    warp, FonT, freq_star[1],
-                #    past_kernel.dtheta_ker, present_kernel.val_ker,
-                #    optimize='optimal',
-                #)
-                #print('ES 1')
+#                 print('ES 1')
+#                 source += np.einsum(
+#                     'wn...p,p,yhp,zj...p->wnyzhj',
+#                     warp, freq_star[1][mask],
+#                     past_kernel.dtheta_ker[:, :, mask],
+#                     present_kernel.val_ker,
+#                     optimize=True,
+#                 )
 
-                source += np.einsum(
-                    'wn...lvm,lvm,lvm,n,yhlvm,zj...lvm->wnyzhj',
-                    warp, FonT, freq_star[2], 1j * ntor.squeeze(),
-                    past_kernel.val_ker, present_kernel.val_ker,
-                    optimize='optimal',
-                )
                 print('ES 2')
+                source += np.einsum(
+                    'wn...p,p,n,yhp,zj...p->wnyzhj',
+                    warp, freq_star[2][mask],
+                    1j * ntor.squeeze(),
+                    past_kernel.val_ker[:, :, mask],
+                    present_kernel.val_ker,
+                    optimize=True,
+                )
 
+                print('ACC')
                 self._output[
                     :, :,
                     past_kernel.psi_slice, present_kernel.psi_slice,
                     past_kernel.theta_slice, present_kernel.theta_slice
                 ] += source
-                #raise NotImplementedError()
-
-
-# In[178]:
-
+            return
 
 def main():
     A = Z = 1
@@ -482,15 +514,15 @@ def main():
     rg = np.linspace(100, 150, 32)
     qq = 1 + 0*np.linspace(0, 1, rg.size)**2
 
-    theta = np.linspace(0, 2 * np.pi, 64)
-    vpar = np.linspace(-1, 1, 24)
+    theta = np.linspace(0, 2 * np.pi, 128)
+    vpar = np.multiply.outer(np.linspace(0, 1, 24), [1, -1])
     mu = np.linspace(0, 1, 16)
 
     grid = Grid(1, 1, 900, rg, qq, theta, vpar, mu)
     np.who(grid.__dict__)
 
-    #plt.plot(grid.radius.squeeze(), grid.psi.squeeze())
-    #plt.show()
+    plt.plot(grid.radius.squeeze(), grid.psi.squeeze())
+    plt.show()
 
     pot = np.zeros_like(rg)
 
@@ -500,11 +532,20 @@ def main():
 
     np.who(adv.__dict__)
 
-    #plt.subplot(121)
-    #plt.plot(theta, adv._r[16].reshape(theta.size, -1))
-    #plt.subplot(122)
-    #plt.plot(theta, adv._vpar[16].reshape(theta.size, -1))
-    #plt.show()
+    plt.subplot(121)
+    plt.plot(theta, adv._r[:, 16].reshape(theta.size, -1))
+    plt.subplot(122)
+    plt.plot(theta, adv._vpar[:, 16].reshape(theta.size, -1))
+    plt.show()
+
+    plt.pcolormesh(
+#         vpar[:, 0],
+#         rg,
+        np.any(adv.trapped[:, :, :, 0] ^ adv.trapped[:, :, :, 1], axis=1)
+    )
+    plt.colorbar()
+    plt.show()
+    return
 
     adv.compute_freq()
 
@@ -512,40 +553,42 @@ def main():
 
     time = adv._int_time(grid.theta.squeeze())
     phi  = adv._int_phi(grid.theta.squeeze())
-    #plt.subplot(121)
-    #plt.plot(
-    #    theta,
-    #    time[16, :].reshape(theta.size, -1),
-    #)
-    #plt.subplot(122)
-    #plt.plot(
-    #    theta,
-    #    phi[16, :].reshape(theta.size, -1),
-    #)
-    #plt.show()
+    plt.subplot(121)
+    plt.plot(
+        theta,
+        time[:, 16].reshape(theta.size, -1),
+    )
+    plt.subplot(122)
+    plt.plot(
+        theta,
+        phi[:, 16].reshape(theta.size, -1),
+    )
+    plt.show()
 
     kern = KernelComputer(
         grid,
-        psi=rg[2:15],
+        psi=grid.psi.squeeze()[2:15],
         theta=theta[2:21],
         Neq=np.ones_like(rg),
         Teq=np.ones_like(rg),
 #         Veq=np.zeros_like(rg),
-        omega=1e-4 * np.ones(1),
+        omega=np.ones(1),
         ntor=np.arange(10),
     )
     kern.compute(adv)
 
+    out = kern._output
+    print(out.shape)
+    print(abs(out).min(), abs(out).max())
 
-# In[179]:
+    plt.pcolormesh(
+        abs(out[0, 5].transpose(0, 2, 1, 3).reshape(13*19, 13*19)),
+#         norm=mpl.colors.LogNorm(),
+    )
+    plt.colorbar()
 
+# %load_ext line_profiler
 
-# %%prun
-
+# %prun main()
+# %lprun -f KernelComputer.compute main()
 main()
-
-
-# In[ ]:
-
-
-
