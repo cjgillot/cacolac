@@ -454,6 +454,54 @@ class KernelElementComputer:
         # Sum everything
         self.add_contribution(present_kernel, warp, mask, output)
 
+    def compute_trapped(self, output):
+        """Compute contribution of trapped particle when the trajectory
+        between the two points involves a u-turn.
+        """
+        c = self._computer
+        a = self._adv
+
+        # Interpolation path at present position
+        theta2 = c._theta
+        swap = np.s_[..., [1,0]]
+        psi2 = self._psi_path (theta2)
+        phi2 = self._phi_path (theta2) - self._phi1[swap]
+        tim2 = self._time_path(theta2) - self._tim1[swap]
+
+        # Adjust in case the causality is wrong
+        uncausal = tim2 < 0
+        tim2 += uncausal * a.bounce_time
+        phi2 += uncausal * a.bounce_phi
+        assert np.all(tim2 >= 0)
+        del uncausal
+
+        # Compute relevant particles
+        mask  = np.any(self._past_kernel.val_ker[swap], axis=(0, 1))
+        mask &= a.trapped[..., np.newaxis]
+
+        # Fourier-space displacement
+        dist = (
+            - np.multiply.outer(self._omega, tim2)
+            + np.multiply.outer(self._ntor,  phi2)
+        )[:, :, :, mask]
+        warp = np.exp(1j * dist)
+        #assert np.all(np.isfinite(warp))
+
+        # Common part
+        warp *= self._bounce_warp[swap][:, :, np.newaxis, mask]
+        #assert np.all(np.isfinite(warp))
+
+        # Interpolate present point
+        present_kernel = make_interp_kernel(
+            c._psi, psi2[:, mask],
+            c._theta, theta2,
+            with_deriv=False,
+            gyroavg=self._gyroavg,
+        )
+
+        # Sum everything
+        self.add_contribution(present_kernel, warp, mask, output)
+
     def add_contribution(self, present_kernel, warp, mask, output):
         c = self._computer
         past_kernel = self._past_kernel
