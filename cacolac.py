@@ -244,8 +244,13 @@ class ParticleAdvector:
         self._int_phi = spline.antiderivative()
 
         # Compute full-bounce quantities
-        bounce_time = abs(self._int_time(np.pi))
-        bounce_phi  = abs(self._int_phi (np.pi))
+        bounce_time = self._int_time(np.pi)
+        bounce_phi  = self._int_phi (np.pi)
+
+        # Get positive frequencies
+        bounce_sign  = np.sign(bounce_time)
+        bounce_phi  *= bounce_sign
+        bounce_time *= bounce_sign
 
         # Add the mirror part for trapped particles
         trapped = self._trapped
