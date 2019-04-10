@@ -35,15 +35,19 @@ class Grid:
         theta, psi, mu, vpar, = meshgrid(theta, psi, mu, vpar)
         rg = rg.reshape(psi.shape)
         Rred = 1 + rg/R0 * np.cos(theta)
-        ltor = - Zs * psi + As * R0 * Rred * vpar
 
         self._r = rg
         self._y = psi
         self._theta = theta
-        self._ltor = ltor
+        self._ltor = - Zs * psi + As * R0 * Rred * vpar
         self._vpar = vpar
-        self._ener = vpar**2 + mu
-        self._spar = np.sign(vpar)
+        self._ener = As/2 * vpar**2 + mu / Rred
+        if vpar.ndim == 2:
+            self._spar = np.asarray([1, -1]).reshape(
+                (vpar.ndim - 1) * (1,) + (2,)
+            )
+        else:
+            self._spar = np.sign(vpar)
         self._mu = mu
         self._q = qq[..., np.newaxis, np.newaxis, np.newaxis]
 
@@ -130,7 +134,7 @@ class ParticleAdvector:
         r    = g.radius
         Rred = 1 + r/R0
 
-        ener = g.vpar**2 + 2/A * g.mu / (1 + r / R0) + 2*Z/A * P(psi)
+        ener = g.vpar**2 + 2/A / Rred * g.mu + 2*Z/A * P(psi)
         ltor = psi - A/Z * R0 * Rred * vpar
 
         shape = np.broadcast(psi, g.theta, g.mu, vpar).shape
@@ -169,11 +173,10 @@ class ParticleAdvector:
                 print('LOOP v', _)
                 psi = ltor + A/Z * R0 * Rred * vpar
 
-                trapped = np.any(vpar == 0, axis=0) & g.mu[0].astype(bool)
-
                 # Anchor at slowest position.
-                # This allows to have the same anchor the two sides of a trapped particle,
-                # while controlling the error for passing particles.
+                # This allows to have the same anchor the two sides of a
+                # trapped particle, while controlling the error for passing
+                # particles.
                 avg_psi = np.take_along_axis(
                     psi,
                     np.argmin(abs(vpar), axis=0)[np.newaxis],
@@ -209,7 +212,11 @@ class ParticleAdvector:
         self._vpar = vpar
         self._Rred = Rred
 
+        # Compute trapped particles
         trapped = np.any(vpar == 0, axis=0, keepdims=True) & g.mu.astype(bool)
+        if g.vpar.squeeze().ndim == 2:
+            assert np.all(trapped[..., 0] == trapped[..., 1])
+            trapped = trapped[..., 0]
         self._trapped = trapped.squeeze()
 
     def compute_freq(self):
@@ -449,7 +456,9 @@ class KernelComputer:
 
                 # FIXME Add trapped particles
                 np.who(locals())
-                trapped = adv.trapped[mask]
+                trapped = adv.trapped[
+                    np.any(mask, axis=-1)
+                ]
 
                 # Fourier-space time-periodicity
                 # FIXME
