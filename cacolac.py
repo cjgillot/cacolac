@@ -433,40 +433,32 @@ class KernelElementComputer:
             gyroavg=self._gyroavg,
         )
 
-        # Compute relevant particles
-        mask = np.ones(past_kernel.val_ker.shape[3:], dtype=bool)
-#         mask = np.any(past_kernel.val_ker, axis=(0, 1))
-#         print('MASK', mask.size, mask.sum())
-
         # Contribution
         print('PP')
         warp = np.zeros(
             self._ntor.squeeze().shape +
             (past_kernel.psi_size, past_kernel.theta_size,) +
-            theta1.shape +
-            (np.sum(mask),)
+            psi1.shape
         , dtype=np.complex128)
 
         # Entropic frequency
         freq_star = c._freq_star
 
 #         print('PP 0')
-#         warp += freq_star[0][mask] * past_kernel.dpsi_ker[:, :, :, mask]
+#         warp += freq_star[0] * past_kernel.dpsi_ker
 
 #         print('PP 1')
-#         warp += freq_star[1][mask] * past_kernel.dtheta_ker[:, :, :, mask]
-
-        np.who(locals())
+#         warp += freq_star[1] * past_kernel.dtheta_ker
 
         print('PP 2')
         warp += np.multiply.outer(
             1j * self._ntor.squeeze(),
-            freq_star[2][mask] *
-            past_kernel.val_ker[..., mask]
+            freq_star[2] *
+            past_kernel.val_ker
         )
 
         # Jacobian for theta integral
-        warp *= a.ifreq(theta1)[..., mask]
+        warp *= a.ifreq(theta1)
 
         # Verify computation
         np.who(locals())
@@ -475,7 +467,6 @@ class KernelElementComputer:
         # Position-independent quantities
         self._past_kernel = past_kernel
         self._past_warp = warp
-        self._past_mask = mask
 
         # Position-dependent quantities
         # TODO: remove
@@ -501,13 +492,18 @@ class KernelElementComputer:
         tim2 = self._time_path(theta2)
 
         # Interpolate present point
-        present_kernel, mask = self._make_present_kernel(psi2, theta2)
+        present_kernel = make_interp_kernel(
+            c._psi, psi2,
+            c._theta, theta2,
+            with_deriv=False,
+            gyroavg=self._gyroavg,
+        )
 
         # Compute warping
-        warp = self._warp_present(psi2, theta2, phi2, tim2, mask)
+        warp = self._warp_present(psi2, theta2, phi2, tim2)
 
         # Assemble
-        self._add_contribution(present_kernel, warp, mask, output=output)
+        self._add_contribution(present_kernel, warp, output=output)
 
     def compute_trapped(self, theta2, output):
         """Compute contribution of trapped particle when the trajectory
@@ -546,9 +542,18 @@ class KernelElementComputer:
         tim2 -= .5 * a.bounce_time
         phi2 -= .5 * a.bounce_phi
 
+        # Only select trapped particles
+        mask = np.logical_or.outer(
+            a.trapped,
+            np.zeros(2, dtype=bool)
+        )
+
         # Interpolate present point
-        present_kernel, mask = self._make_present_kernel(
-            psi2, theta2, mask=a.trapped[..., np.newaxis]
+        present_kernel = make_interp_kernel(
+            c._psi, psi2[:, mask],
+            c._theta, theta2,
+            with_deriv=False,
+            gyroavg=self._gyroavg,
         )
 
         # Compute warping
@@ -557,13 +562,14 @@ class KernelElementComputer:
         # Assemble
         self._add_contribution(present_kernel, warp, mask, output=output)
 
-    def _warp_present(self, psi2, theta2, phi2, tim2, mask):
+    def _warp_present(self, psi2, theta2, phi2, tim2, mask=None):
         """Compute the displacement warping between the past and present particle."""
         c = self._computer
         a = self._adv
 
         phi2 = phi2[np.newaxis, :] - self._phi1[:, np.newaxis]
         tim2 = tim2[np.newaxis, :] - self._tim1[:, np.newaxis]
+        bwrp = self._bounce_warp[..., np.newaxis, np.newaxis, :, :, :, :]
 
         # Adjust in case the causality is wrong
         while True:
@@ -574,11 +580,14 @@ class KernelElementComputer:
             phi2 += uncausal * a.bounce_phi
             del uncausal
         assert np.all(tim2 >= 0)
+        assert np.all(tim2 <= a.bounce_time)
 
         # Compute relevant particles
-        psi2 = psi2[..., mask]
-        tim2 = tim2[..., mask]
-        phi2 = phi2[..., mask]
+        if mask is not None:
+            psi2 = psi2[..., mask]
+            tim2 = tim2[..., mask]
+            phi2 = phi2[..., mask]
+            bwrp = bwrp[..., mask]
 
         # Fourier-space displacement
         dist = (
@@ -589,55 +598,22 @@ class KernelElementComputer:
         assert np.all(np.isfinite(warp))
 
         # Periodicity effect
-        warp *= self._bounce_warp[..., np.newaxis, np.newaxis, mask]
+        warp *= bwrp
 
         return warp
 
-    def _make_present_kernel(self, psi, theta, mask=None):
-        c = self._computer
-
-        # Copy mask for later modification
-        if mask is None:
-            mask = self._past_mask.copy()
-        else:
-            mask = self._past_mask & mask
-
-        # Interpolate present point
-        present_kernel = make_interp_kernel(
-            c._psi, psi[:, mask],
-            c._theta, theta,
-            with_deriv=False,
-            gyroavg=self._gyroavg,
-        )
-        print('INTERP')
-        np.who(locals())
-        np.who(present_kernel.__dict__)
-
-        # Shrink the interpolator if required
-        if False:
-            val_ker = present_kernel.val_ker
-
-            np.who(locals())
-
-            # Compute relevant particles
-            submask = np.any(val_ker, axis=(0, 1, 2))
-            present_kernel.val_ker = val_ker[:, :, :, submask]
-
-            # Reduction in size
-            print('RED', mask.sum(), submask.sum())
-            mask[mask] &= submask
-
-        return present_kernel, mask
-
-    def _add_contribution(self, present_kernel, present_warp, mask, *, output):
+    def _add_contribution(
+        self, present_kernel, present_warp,
+        mask=None, *, output
+    ):
         c = self._computer
 
         past_kernel = self._past_kernel
         past_warp   = self._past_warp
 
         # Compute relevant subarray
-        submask = mask[self._past_mask]
-        past_warp = past_warp[..., submask]
+        if mask is not None:
+            past_warp = past_warp[..., mask]
 
         np.who(locals())
         np.who(self.__dict__)
