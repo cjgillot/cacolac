@@ -500,9 +500,13 @@ class KernelElementComputer:
         phi2 = self._phi_path (theta2)
         tim2 = self._time_path(theta2)
 
-        present_kernel, warp, mask = self._warp_present(
-            psi2, theta2, phi2, tim2
-        )
+        # Interpolate present point
+        present_kernel, mask = self._make_present_kernel(psi2, theta2)
+
+        # Compute warping
+        warp = self._warp_present(psi2, theta2, phi2, tim2, mask)
+
+        # Assemble
         self._add_contribution(present_kernel, warp, mask, output=output)
 
     def compute_trapped(self, theta2, output):
@@ -539,16 +543,21 @@ class KernelElementComputer:
         #  - from theta=0 to theta2 (+t2).
 
         # Add half-bounce to use the theta=0 crossing as a reference
-        tim2 += .5 * a.bounce_time
-        phi2 += .5 * a.bounce_phi
+        tim2 -= .5 * a.bounce_time
+        phi2 -= .5 * a.bounce_phi
 
-        present_kernel, warp, mask = self._warp_present(
-            psi2, theta2, phi2, tim2,
-            mask=a.trapped[..., np.newaxis]
+        # Interpolate present point
+        present_kernel, mask = self._make_present_kernel(
+            psi2, theta2, mask=a.trapped[..., np.newaxis]
         )
+
+        # Compute warping
+        warp = self._warp_present(psi2, theta2, phi2, tim2, mask)
+
+        # Assemble
         self._add_contribution(present_kernel, warp, mask, output=output)
 
-    def _warp_present(self, psi2, theta2, phi2, tim2, mask=None):
+    def _warp_present(self, psi2, theta2, phi2, tim2, mask):
         """Compute the displacement warping between the past and present particle."""
         c = self._computer
         a = self._adv
@@ -557,14 +566,14 @@ class KernelElementComputer:
         tim2 = tim2[np.newaxis, :] - self._tim1[:, np.newaxis]
 
         # Adjust in case the causality is wrong
-        uncausal = tim2 < 0
-        tim2 += uncausal * a.bounce_time
-        phi2 += uncausal * a.bounce_phi
+        while True:
+            uncausal = tim2 < 0
+            if not np.any(uncausal):
+                break
+            tim2 += uncausal * a.bounce_time
+            phi2 += uncausal * a.bounce_phi
+            del uncausal
         assert np.all(tim2 >= 0)
-        del uncausal
-
-        # Interpolate present point
-        present_kernel, mask = self._make_present_kernel(psi2, theta2, mask)
 
         # Compute relevant particles
         psi2 = psi2[..., mask]
@@ -582,9 +591,9 @@ class KernelElementComputer:
         # Periodicity effect
         warp *= self._bounce_warp[..., np.newaxis, np.newaxis, mask]
 
-        return present_kernel, warp, mask
+        return warp
 
-    def _make_present_kernel(self, psi, theta, mask):
+    def _make_present_kernel(self, psi, theta, mask=None):
         c = self._computer
 
         # Copy mask for later modification
