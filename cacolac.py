@@ -43,9 +43,7 @@ class Grid:
         self._vpar = vpar
         self._ener = As/2 * vpar**2 + mu / Rred
         if vpar.ndim == 2:
-            self._spar = np.asarray([1, -1]).reshape(
-                (vpar.ndim - 1) * (1,) + (2,)
-            )
+            self._spar = np.asarray([1, -1])[(None,) * (vpar.ndim - 1)]
         else:
             self._spar = np.sign(vpar)
         self._mu = mu
@@ -224,18 +222,17 @@ class ParticleAdvector:
         q = g.qprofile_at(self._r)
         theta = self._grid.theta.squeeze()
 
-        freq  = self._vpar / (q * g.R0 * self._Rred)
-        freq += self._pot(self._psi, nu=1)
+        vtheta  = self._vpar / (q * g.R0 * self._Rred)
+        vtheta += self._pot(self._psi, nu=1)
         # FIXME Add vD.gradtheta
 
-        self._freq = freq
-
-        ifreq = 1/freq
+        ifreq = 1/vtheta
         ifreq[~np.isfinite(ifreq)] = 0
-        self._ifreq = interp1d(theta, ifreq)
-        self._int_time = self._ifreq.antiderivative()
+        spline = interp1d(theta, ifreq)
+        self._ifreq = spline
+        self._int_time = spline.antiderivative()
 
-        vphi  = self._vpar / self._Rred / g.R0
+        vphi  = self._vpar / (g.R0 * self._Rred)
         # FIXME Add vE.gradphi
         # FIXME Add vD.gradphi
 
@@ -244,8 +241,8 @@ class ParticleAdvector:
         self._int_phi = spline.antiderivative()
 
         # Compute full-bounce quantities
-        bounce_time = self._int_time(np.pi)
-        bounce_phi  = self._int_phi (np.pi)
+        bounce_time = self._int_time(2 * np.pi)
+        bounce_phi  = self._int_phi (2 * np.pi)
 
         # Get positive frequencies
         bounce_sign  = np.sign(bounce_time)
@@ -739,6 +736,7 @@ def main():
     A = Z = 1
     R0 = 900
 
+    # Build grid
     rg = np.linspace(100, 150, 32)
     qq = 1 + 0*np.linspace(0, 1, rg.size)**2
 
@@ -752,12 +750,10 @@ def main():
     plt.plot(grid.radius.squeeze(), grid.psi.squeeze())
     plt.show()
 
+    # Advect particles
     pot = np.zeros_like(rg)
-
     adv = ParticleAdvector(grid, pot)
-
     adv.compute_trajectory()
-
     np.who(adv.__dict__)
 
     plt.subplot(121)
@@ -766,21 +762,12 @@ def main():
     plt.plot(theta, adv._vpar[:, 16].reshape(theta.size, -1))
     plt.show()
 
-    plt.pcolormesh(
-#         vpar[:, 0],
-#         rg,
-        np.any(adv.trapped[:, :, :, 0] ^ adv.trapped[:, :, :, 1], axis=1)
-    )
-    plt.colorbar()
-    plt.show()
-    return
-
+    # Compute trajectory timing
     adv.compute_freq()
-
     np.who(adv.__dict__)
 
-    time = adv._int_time(grid.theta.squeeze())
-    phi  = adv._int_phi(grid.theta.squeeze())
+    time = adv.time_path(grid.theta.squeeze())
+    phi  = adv.phi_path(grid.theta.squeeze())
     plt.subplot(121)
     plt.plot(
         theta,
@@ -800,7 +787,7 @@ def main():
         Neq=np.ones_like(rg),
         Teq=np.ones_like(rg),
 #         Veq=np.zeros_like(rg),
-        omega=np.ones(1),
+        omega=np.asarray([1e-3 + 1e-4j]),
         ntor=np.arange(10),
     )
     kern.compute(adv)
