@@ -372,7 +372,12 @@ class make_interp_kernel:
         return i_max - i_min, np.s_[i_min:i_max]
 
 class KernelElementComputer:
-    def __init__(self, grid, computer, adv, theta1, gyroavg):
+    """Helper class handling computation state for a kernel element.
+
+    This class is designed for vectorised computation of the positions of
+    the present particles.
+    """
+    def __init__(self, grid, computer, adv, gyroavg):
         self._grid      = grid
         self._computer  = computer
         self._adv       = adv
@@ -382,29 +387,14 @@ class KernelElementComputer:
             computer._omega, computer._ntor,
             indexing='ij', sparse=True,
         )
-        self._theta1    = theta1
         self._psi_path  = interp1d(grid.theta.squeeze(), adv.psi_path)
         self._phi_path  = adv.phi_path
         self._time_path = adv.time_path
 
     def precompute(self):
+        """This method computes the position-independent quantities."""
         c = self._computer
         a = self._adv
-
-        # Interpolation path at past position
-        psi1 = self._psi_path (self._theta1)
-        phi1 = self._phi_path (self._theta1)
-        tim1 = self._time_path(self._theta1)
-        self._phi1 = phi1
-        self._tim1 = tim1
-
-        # Interpolate past position
-        self._past_kernel = make_interp_kernel(
-            c._psi, psi1,
-            c._theta, self._theta1,
-            with_deriv=True,
-            gyroavg=self._gyroavg,
-        )
 
         # Fourier-space time-periodicity
         bounce_dist = (
@@ -413,73 +403,161 @@ class KernelElementComputer:
         )
         bounce_warp = - np.expm1(1j * bounce_dist)
         np.reciprocal(bounce_warp, out=bounce_warp)
-        #assert np.all(np.isfinite(warp))
+        assert np.all(np.isfinite(bounce_warp))
 
         # Distribution function
         bounce_warp *= c._FonT
-        #assert np.all(np.isfinite(warp))
-
-        # Jacobian for theta integral
-        bounce_warp *= a.ifreq(self._theta1)
+        assert np.all(np.isfinite(bounce_warp))
 
         self._bounce_warp = bounce_warp
 
-    def compute_passing(self, output):
-        c = self._computer
-        a = self._adv
+    def compute_past(self, theta1):
+        """This method computes the effect on the past particle at `theta1`.
 
-        # Interpolation path at present position
-        theta2 = c._theta
-        psi2 = self._psi_path (theta2)
-        phi2 = self._phi_path (theta2) - self._phi1
-        tim2 = self._time_path(theta2) - self._tim1
-
-        # Adjust in case the causality is wrong
-        uncausal = tim2 < 0
-        tim2 += uncausal * a.bounce_time
-        phi2 += uncausal * a.bounce_phi
-        assert np.all(tim2 >= 0)
-        del uncausal
-
-        # Compute relevant particles
-        mask = np.any(self._past_kernel.val_ker, axis=(0, 1))
-
-        # Fourier-space displacement
-        dist = (
-            - np.multiply.outer(self._omega, tim2)
-            + np.multiply.outer(self._ntor,  phi2)
-        )[:, :, :, mask]
-        warp = np.exp(1j * dist)
-        #assert np.all(np.isfinite(warp))
-
-        # Common part
-        warp *= self._bounce_warp[:, :, np.newaxis, mask]
-        #assert np.all(np.isfinite(warp))
-
-        # Interpolate present point
-        present_kernel = make_interp_kernel(
-            c._psi, psi2[:, mask],
-            c._theta, theta2,
-            with_deriv=False,
-            gyroavg=self._gyroavg,
-        )
-
-        # Sum everything
-        self.add_contribution(present_kernel, warp, mask, output)
-
-    def compute_trapped(self, output):
-        """Compute contribution of trapped particle when the trajectory
-        between the two points involves a u-turn.
+        It contains:
+        - the coordinates of the past point,
+        - the interpolation kernel.
         """
         c = self._computer
         a = self._adv
 
+        theta1 = np.atleast_1d(theta1)
+
+        # Interpolation path at past position
+        psi1 = self._psi_path (theta1)
+        phi1 = self._phi_path (theta1)
+        tim1 = self._time_path(theta1)
+
+        # Interpolate past position
+        past_kernel = make_interp_kernel(
+            c._psi, psi1,
+            c._theta, theta1,
+            with_deriv=True,
+            gyroavg=self._gyroavg,
+        )
+
+        # Compute relevant particles
+        mask = np.ones(past_kernel.val_ker.shape[3:], dtype=bool)
+#         mask = np.any(past_kernel.val_ker, axis=(0, 1))
+#         print('MASK', mask.size, mask.sum())
+
+        # Contribution
+        print('PP')
+        warp = np.zeros(
+            self._ntor.squeeze().shape +
+            (past_kernel.psi_size, past_kernel.theta_size,) +
+            theta1.shape +
+            (np.sum(mask),)
+        , dtype=np.complex128)
+
+        # Entropic frequency
+        freq_star = c._freq_star
+
+#         print('PP 0')
+#         warp += freq_star[0][mask] * past_kernel.dpsi_ker[:, :, :, mask]
+
+#         print('PP 1')
+#         warp += freq_star[1][mask] * past_kernel.dtheta_ker[:, :, :, mask]
+
+        np.who(locals())
+
+        print('PP 2')
+        warp += np.multiply.outer(
+            1j * self._ntor.squeeze(),
+            freq_star[2][mask] *
+            past_kernel.val_ker[..., mask]
+        )
+
+        # Jacobian for theta integral
+        warp *= a.ifreq(theta1)[..., mask]
+
+        # Verify computation
+        np.who(locals())
+        assert np.all(np.isfinite(warp))
+
+        # Position-independent quantities
+        self._past_kernel = past_kernel
+        self._past_warp = warp
+        self._past_mask = mask
+
+        # Position-dependent quantities
+        # TODO: remove
+        self._phi1 = phi1
+        self._tim1 = tim1
+
+    def compute_passing(self, theta2, output):
+        """This method computes the effect on the past particle at `theta1`.
+
+        It contains:
+        - the coordinates of the past point,
+        - the interpolation kernel,
+        - the displacement warping.
+        """
+        c = self._computer
+        a = self._adv
+
+        theta2 = np.atleast_1d(theta2)
+
         # Interpolation path at present position
-        theta2 = c._theta
-        swap = np.s_[..., [1,0]]
         psi2 = self._psi_path (theta2)
-        phi2 = self._phi_path (theta2) - self._phi1[swap]
-        tim2 = self._time_path(theta2) - self._tim1[swap]
+        phi2 = self._phi_path (theta2)
+        tim2 = self._time_path(theta2)
+
+        present_kernel, warp, mask = self._warp_present(
+            psi2, theta2, phi2, tim2
+        )
+        self._add_contribution(present_kernel, warp, mask, output=output)
+
+    def compute_trapped(self, theta2, output):
+        """Compute contribution of trapped particle when the trajectory
+        between the two points involves a u-turn.
+
+        It contains:
+        - the coordinates of the past point,
+        - the interpolation kernel,
+        - the displacement warping.
+
+        This function is still fragile.
+        """
+        c = self._computer
+        a = self._adv
+
+        theta2 = np.atleast_1d(theta2)
+
+        # Interpolation path at present position
+        swap = np.s_[..., [1,0]]
+        psi2 = self._psi_path (theta2)[swap]
+        phi2 = self._phi_path (theta2)[swap]
+        tim2 = self._time_path(theta2)[swap]
+
+        # The computation of the elapsed time is done as follows:
+        # Consider the trajectory
+        #               theta1  theta=0
+        #          /-------o__t1__+
+        #          v              +
+        #          \--------------+==t2==o
+        # The time to go from point 1 to point 2 is decomposed as follows:
+        #  - from theta1 to theta=0 (-t1);
+        #  - from theta=0 to theta=0 on the other branch;
+        #  - from theta=0 to theta2 (+t2).
+
+        # Add half-bounce to use the theta=0 crossing as a reference
+        tim2 += .5 * a.bounce_time
+        phi2 += .5 * a.bounce_phi
+
+        present_kernel, warp, mask = self._warp_present(
+            psi2, theta2, phi2, tim2,
+            mask=a.trapped[..., np.newaxis]
+        )
+        self._add_contribution(present_kernel, warp, mask, output=output)
+
+    def _warp_present(self, psi2, theta2, phi2, tim2, mask=None):
+        """Compute the displacement warping between the past and present particle."""
+        c = self._computer
+        a = self._adv
+
+        phi2 = phi2[np.newaxis, :] - self._phi1[:, np.newaxis]
+        tim2 = tim2[np.newaxis, :] - self._tim1[:, np.newaxis]
 
         # Adjust in case the causality is wrong
         uncausal = tim2 < 0
@@ -488,77 +566,90 @@ class KernelElementComputer:
         assert np.all(tim2 >= 0)
         del uncausal
 
+        # Interpolate present point
+        present_kernel, mask = self._make_present_kernel(psi2, theta2, mask)
+
         # Compute relevant particles
-        mask  = np.any(self._past_kernel.val_ker[swap], axis=(0, 1))
-        mask &= a.trapped[..., np.newaxis]
+        psi2 = psi2[..., mask]
+        tim2 = tim2[..., mask]
+        phi2 = phi2[..., mask]
 
         # Fourier-space displacement
         dist = (
             - np.multiply.outer(self._omega, tim2)
             + np.multiply.outer(self._ntor,  phi2)
-        )[:, :, :, mask]
+        )
         warp = np.exp(1j * dist)
-        #assert np.all(np.isfinite(warp))
+        assert np.all(np.isfinite(warp))
 
-        # Common part
-        warp *= self._bounce_warp[swap][:, :, np.newaxis, mask]
-        #assert np.all(np.isfinite(warp))
+        # Periodicity effect
+        warp *= self._bounce_warp[..., np.newaxis, np.newaxis, mask]
+
+        return present_kernel, warp, mask
+
+    def _make_present_kernel(self, psi, theta, mask):
+        c = self._computer
+
+        # Copy mask for later modification
+        if mask is None:
+            mask = self._past_mask.copy()
+        else:
+            mask = self._past_mask & mask
 
         # Interpolate present point
         present_kernel = make_interp_kernel(
-            c._psi, psi2[:, mask],
-            c._theta, theta2,
+            c._psi, psi[:, mask],
+            c._theta, theta,
             with_deriv=False,
             gyroavg=self._gyroavg,
         )
-
-        # Sum everything
-        self.add_contribution(present_kernel, warp, mask, output)
-
-    def add_contribution(self, present_kernel, warp, mask, output):
-        c = self._computer
-        past_kernel = self._past_kernel
-
-        # Contribution
-        print('ES')
-        source = np.zeros((
-            self._omega.size, self._ntor.size,
-            past_kernel.psi_size, present_kernel.psi_size,
-            past_kernel.theta_size, present_kernel.theta_size,
-        ), dtype=np.complex128)
+        print('INTERP')
         np.who(locals())
+        np.who(present_kernel.__dict__)
 
-        # Entropic frequency
-        freq_star = c._freq_star
+        # Shrink the interpolator if required
+        if False:
+            val_ker = present_kernel.val_ker
 
-#         print('ES 0')
-#         source += np.einsum(
-#             'wn...p,p,yhp,zj...p->wnyzhj',
-#             warp, freq_star[0][mask],
-#             past_kernel.dpsi_ker[:, :, mask],
-#             present_kernel.val_ker,
-#             optimize=True,
-#         )
+            np.who(locals())
 
-#         print('ES 1')
-#         source += np.einsum(
-#             'wn...p,p,yhp,zj...p->wnyzhj',
-#             warp, freq_star[1][mask],
-#             past_kernel.dtheta_ker[:, :, mask],
-#             present_kernel.val_ker,
-#             optimize=True,
-#         )
+            # Compute relevant particles
+            submask = np.any(val_ker, axis=(0, 1, 2))
+            present_kernel.val_ker = val_ker[:, :, :, submask]
 
-        print('ES 2')
-        source += np.einsum(
-            'wn...p,p,n,yhp,zj...p->wnyzhj',
-            warp, freq_star[2][mask],
-            1j * self._ntor.squeeze(),
-            past_kernel.val_ker[:, :, mask],
+            # Reduction in size
+            print('RED', mask.sum(), submask.sum())
+            mask[mask] &= submask
+
+        return present_kernel, mask
+
+    def _add_contribution(self, present_kernel, present_warp, mask, *, output):
+        c = self._computer
+
+        past_kernel = self._past_kernel
+        past_warp   = self._past_warp
+
+        # Compute relevant subarray
+        submask = mask[self._past_mask]
+        past_warp = past_warp[..., submask]
+
+        np.who(locals())
+        np.who(self.__dict__)
+        np.who(present_kernel.__dict__)
+
+        # Sum all the things!
+        print('ES')
+        source = np.einsum(
+            # w=omega, n=ntor, p=particles,
+            # uv=theta vectorisation,
+            # yz=both psi, hj=both theta
+            'wnuvp,nyhup,zjvp->wnyzhj',
+            present_warp, past_warp,
             present_kernel.val_ker,
             optimize=True,
         )
-        #assert np.all(np.isfinite(source))
+        assert np.all(np.isfinite(source))
+        np.who(locals())
 
         print('ACC')
         output[
@@ -604,32 +695,43 @@ class KernelComputer:
         Veq = self._Veq
 
         # Distribution function
-        Feq = np.zeros(np.broadcast(g.psi, g.vpar, g.mu).shape[1:])
-        print(Feq.shape, g.psi.shape)
-        Feq *= np.exp(- g.energy.squeeze()/Teq)
+        lnFeq = np.zeros(np.broadcast(g.psi, g.vpar, g.mu).shape[1:])
+        lnFeq -= - g.energy.mean(axis=0).squeeze()/Teq
         if Veq is not None:
-            Feq *= np.exp(g.ltor * Veq/Teq)
-        Feq *= Neq * Teq**1.5
-        self._FonT = Feq/Teq
+            lnFeq += g.ltor.mean(axis=0) * Veq/Teq
+        lnFeq += np.log(Neq)
+        lnFeq -= 1.5 * np.log(Teq)
+
+        FonT  = np.exp(lnFeq)
+        FonT /= Teq
+        self._FonT = FonT
 
         # Entropic frequency vector `Teq {ln Feq, X}`
-        lnF = interp1d(g.psi.squeeze(), Feq)
+        lnF = interp1d(g.psi.squeeze(), lnFeq)
         self._freq_star = [
-            np.zeros_like(Feq),
-            np.zeros_like(Feq),
-            lnF(g.psi.squeeze(), nu=1)/Feq,
+            np.zeros_like(lnFeq),
+            np.zeros_like(lnFeq),
+            lnF(g.psi.squeeze(), nu=1),
         ]
+        for _ in self._freq_star:
+            assert np.all(np.isfinite(_))
 
     def compute(self, adv, gyroavg=False):
         # Loop over the past position
         for theta1 in self._theta:
-            kec = KernelElementComputer(self._grid, self, adv, theta1, gyroavg)
+            kec = KernelElementComputer(self._grid, self, adv, gyroavg)
 
-            # Precompute effects of past particle
+            # Particle-independent effects
             kec.precompute()
 
+            # Effects of past particle
+            kec.compute_past(self._theta[:7])
+
             # Add passing particles
-            kec.compute_passing(self._output)
+            kec.compute_passing(self._theta[:9], output=self._output)
+
+            # Add trapped particles
+            kec.compute_trapped(self._theta[:9], output=self._output)
 
             return
 
