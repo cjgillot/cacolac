@@ -296,53 +296,66 @@ class make_interp_kernel:
         with_deriv=False,
         gyroavg=False,
     ):
+        self.with_deriv = with_deriv
+        self.gyroavg = gyroavg
+
         psi, theta = self._adjust_points(psi, theta)
         self.psi_size, self.psi_slice = self._choose_slice(psi_grid, psi)
         self.theta_size, self.theta_slice = self._choose_slice(theta_grid, theta)
 
-        print('INTERP', (
-            self.psi_size,
-            self.theta_size,
-            *psi.shape
-        ))
-        self.val_ker = np.zeros((
-            self.psi_size,
-            self.theta_size,
-            *psi.shape
-        ))
+        # Allocate memory
+        shape = (self.psi_size, self.theta_size, *psi.shape)
+        self.val_ker = np.ones(shape)
         if with_deriv:
-            self.dpsi_ker = np.zeros_like(self.val_ker)
-            self.dtheta_ker = np.zeros_like(self.val_ker)
+            self.dpsi_ker = np.zeros(shape)
+            self.dtheta_ker = np.zeros(shape)
 
+        # Compute local interpolation grid
         psi_loc, theta_loc = np.meshgrid(
             psi_grid[self.psi_slice],
             theta_grid[self.theta_slice],
             indexing='ij', sparse=True,
         )
+        self._compute_psi(psi, psi_loc, theta_loc)
+        self._compute_theta(theta, psi_loc, theta_loc)
 
-#         np.who(locals())
+        # Print statistics on sparsity
+        print('SPARSITY',
+              self.val_ker.size,
+              self.val_ker.astype(bool).sum()
+             )
 
-        # Gaussian interpolation in psi
+    def _compute_psi(self, psi, psi_loc, theta_loc):
+        # Linear interpolation in psi
         dpsi = np.diff(psi_loc.squeeze()).mean()
         psi_dist = np.subtract.outer(psi_loc, psi)
-        gauss = np.exp(- psi_dist**2 / dpsi**2)
 
-        self.val_ker[:] = gauss
-        if with_deriv:
-            self.dtheta_ker[:] = gauss
-            self.dpsi_ker[:] = gauss
-            self.dpsi_ker[:] *= - 2 * psi_dist / dpsi**2
+        gauss = 1 - abs(psi_dist / dpsi)
+        np.clip(gauss, 0, None, out=gauss)
 
-        # Gaussian interpolation in theta
+        dgauss  = - np.sign(psi_dist) / dpsi
+        dgauss *= abs(psi_dist) < dpsi
+
+        self.val_ker *= gauss
+        if self.with_deriv:
+            self.dpsi_ker   *= dgauss
+            self.dtheta_ker *= gauss
+
+    def _compute_theta(self, theta, psi_loc, theta_loc):
+        # Linear interpolation in theta
         dtheta = np.diff(theta_loc.squeeze()).mean()
         theta_dist = np.subtract.outer(theta_loc, theta)
-        sinc = np.exp(- theta_dist**2 / dtheta**2)
+
+        sinc = 1 - abs(theta_dist / dtheta)
+        np.clip(sinc, 0, None, out=sinc)
+
+        dsinc  = - np.sign(theta_dist) / dtheta
+        dsinc *= abs(theta_dist) < dtheta
 
         self.val_ker *= sinc
-        if with_deriv:
-            self.dpsi_ker *= sinc
-            self.dtheta_ker *= sinc
-            self.dtheta_ker *= - 2 * theta_dist / dtheta**2
+        if self.with_deriv:
+            self.dpsi_ker   *= sinc
+            self.dtheta_ker *= dsinc
 
     def _adjust_points(self, psi, theta):
         psi = np.asanyarray(psi); n = psi.ndim
