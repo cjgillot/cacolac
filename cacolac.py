@@ -699,23 +699,19 @@ class KernelComputer:
             assert np.all(np.isfinite(_))
 
     def compute(self, adv, gyroavg=False):
-        # Loop over the past position
-        for theta1 in self._theta:
-            kec = KernelElementComputer(self._grid, self, adv, gyroavg)
+        kec = KernelElementComputer(self._grid, self, adv, gyroavg)
 
-            # Particle-independent effects
-            kec.precompute()
+        # Particle-independent effects
+        kec.precompute()
 
-            # Effects of past particle
-            kec.compute_past(self._theta[:7])
+        # Effects of past particle
+        kec.compute_past(self._theta[:7])
 
-            # Add passing particles
-            kec.compute_passing(self._theta[:9], output=self._output)
+        # Add passing particles
+        kec.compute_passing(self._theta[:9], output=self._output)
 
-            # Add trapped particles
-            kec.compute_trapped(self._theta[:9], output=self._output)
-
-            return
+        # Add trapped particles
+        kec.compute_trapped(self._theta[:9], output=self._output)
 
 def main():
     A = Z = 1
