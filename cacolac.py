@@ -477,14 +477,8 @@ class KernelElementComputer:
             - 1j * np.multiply.outer(self._ntor,  a.bounce_phi)
         )
         bounce_warp = np.expm1(1j * bounce_dist)
-        self._warp_causal = 1 + bounce_warp
-
         np.negative(bounce_warp, out=bounce_warp)
         np.reciprocal(bounce_warp, out=bounce_warp)
-        assert np.all(np.isfinite(bounce_warp))
-
-        # Distribution function
-        bounce_warp *= c._FonT
         assert np.all(np.isfinite(bounce_warp))
 
         self._bounce_warp = bounce_warp
@@ -567,8 +561,10 @@ class KernelElementComputer:
         # Jacobian for theta integral
         warp *= a.ifreq(self._tht)
 
+        # Distribution function
+        warp *= c._FonT
+
         # Verify computation
-        np.who(locals())
         assert np.all(np.isfinite(warp))
 
         # Warp to reference position
