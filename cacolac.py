@@ -1,3 +1,71 @@
+"""Cacolac is a linear global gyrokinetic solver.
+
+The method is outlined below:
+    - we compute the path of the particles on the equilibrium state as
+    functions of the poloidal angle theta
+        t(theta), psi(theta), vpar(theta)
+    - we compute the variational kernel by integrating against those
+    trajectories.
+
+The variational problem is written as follows:
+    S = \\int d{psi(0), theta(0), phi(0)}
+        Phi(0, psi(0), theta(0), phi(0))*
+        \\int d{vpar(0), mu} Feq(psi*, vpar, mu)
+        \\int_0^{-oo} dt
+        (W* grad) Phi(t, psi(t), theta(t), phi(t)
+      + Boussinesq term
+
+avec W* = { ln Feq, X } Poisson bracket.
+
+We recast this integral as an integral on the angle theta, and go to Fourier
+space in time and toroidal angle:
+    S = \\sum_n \\int dw
+        \\int Feq{psi*, energy, mu}
+        \\int_0^2 pi dtheta1
+        \\int_-oo^+oo dtheta2 * dt/dtheta(theta2)
+        Phi(psi(theta1), theta1)*
+        (W* grad) Phi(psi(theta2), theta2)
+        exp(+ 1j n (phi(theta2) - phi(theta1)))
+        exp(- 1j w (time(theta2) - time(theta1)))
+        1{time(theta2) <= time(theta1)}
+
+The infinite integral on theta2 comes from the infinite integral on
+time, to take into account multiple passages in the periodic trajectory.
+The Heaviside function corresponds to causality.
+
+We integrate the first one out by explicitly using the bounce time \\tau_b and
+bounce precession \\phi_b.
+
+        \\int_-oo^+oo dtheta2
+        exp(+ 1j n (phi(theta2) - phi(theta1)))
+        exp(- 1j w (time(theta2) - time(theta1)))
+        1{time(theta2) <= time(theta1)}
+        ..(theta2)
+      = \\sum_N \\int dtheta
+        exp(+ 1j n (phi(theta2)  - phi(theta1)  - N \\phi_b))
+        exp(- 1j w (time(theta2) - time(theta1) - N \\tau_b))
+        1{time(theta2) - N \\tau_b <= time(theta1)}
+        ..(theta2)
+      = \\int dtheta
+        exp(+ 1j n (phi(theta2)  - phi(theta1) ))
+        exp(- 1j w (time(theta2) - time(theta1)))
+        1{time(theta2) <= time(theta1)}
+        1/[1 - exp(- 1j n \\phi_b + 1j w \\tau_b)
+        ..(theta2)
+
+With the integral on theta2 spanning only a 2 pi interval.
+The result is therefore,
+
+    S = \\sum_n \\int dw
+        \\int Feq{psi*, energy, mu}
+        \\oint dtheta1 dtheta2
+        Phi(psi(theta1), theta1)*
+        (W* grad) Phi(psi(theta2), theta2) * dt/dtheta(theta2)
+        exp(+ 1j n (phi(theta2)  - phi(theta1) ))
+        exp(- 1j w (time(theta2) - time(theta1)))
+        1/[1 - exp(- 1j n \\phi_b + 1j w \\tau_b)
+        1{time(theta2) <= time(theta1)}
+"""
 
 import importlib
 
@@ -400,11 +468,12 @@ class KernelElementComputer:
         # Fourier-space time-periodicity
         bounce_dist = (
             + 1j * np.multiply.outer(self._omega, a.bounce_time)
-            + 1j * np.multiply.outer(self._ntor,  a.bounce_phi)
+            - 1j * np.multiply.outer(self._ntor,  a.bounce_phi)
         )
-        bounce_warp = - np.expm1(1j * bounce_dist)
-        self._warp_causal = 1 - bounce_warp
+        bounce_warp = np.expm1(1j * bounce_dist)
+        self._warp_causal = 1 + bounce_warp
 
+        np.negative(bounce_warp, out=bounce_warp)
         np.reciprocal(bounce_warp, out=bounce_warp)
         assert np.all(np.isfinite(bounce_warp))
 
@@ -444,7 +513,14 @@ class KernelElementComputer:
 
         It contains:
         - the coordinates of the past point,
-        - the interpolation kernel.
+        - the interpolation kernel,
+        - the action of the equilibrium distribution function.
+
+        Basically, what we are trying to compute can be written as
+            W* grad Phi * dt/dtheta
+        with W* = grad ln Feq
+             grad Phi = (dr, dtheta/r, 1j n) Phi
+             dt/dtheta given by `adv`
         """
         c = self._computer
         a = self._adv
@@ -485,7 +561,7 @@ class KernelElementComputer:
 
         # Warp to reference position
         warp_w, warp_n = \
-                self._warp_half(self._phi, self._tim, -1)
+                self._warp_half(self._phi, self._tim, +1)
 
         warp  = ravel_4(warp)
         warp *= warp_n[:, np.newaxis, np.newaxis, :, :]
@@ -510,14 +586,17 @@ class KernelElementComputer:
         present_kernel = ravel_4(present_kernel) # Flatten particle axes
 
         # Easy part
-        warp_w, warp_n = self._warp_half(self._phi, self._tim, +1)
+        present_warp = self._warp_half(self._phi, self._tim, -1)
 
         # Compute warping
-        warp = self._warp_present(self._phi, self._tim)
-        warp = warp_w, warp_n, warp
+        causal_warp = self._causality(self._phi, self._tim)
 
         # Assemble
-        self._add_contribution(present_kernel, warp, output=output)
+        self._add_contribution(
+            present_kernel, present_warp,
+            causal_warp,
+            output=output,
+        )
 
     def compute_trapped(self, output):
         """Compute contribution of trapped particle when the trajectory
@@ -544,8 +623,8 @@ class KernelElementComputer:
         present_kernel = present_kernel[swap][..., mask]
 
         # Interpolation path at present position
-        phi2 = self._phi[swap].copy()
-        tim2 = self._tim[swap].copy()
+        phi1 = self._phi[swap].copy()
+        tim1 = self._tim[swap].copy()
 
         # The computation of the elapsed time is done as follows:
         # Consider the trajectory
@@ -559,18 +638,21 @@ class KernelElementComputer:
         #  - from theta=0 to theta2 (+t2).
 
         # Add half-bounce to use the theta=0 crossing as a reference
-        tim2 -= .5 * a.bounce_time
-        phi2 -= .5 * a.bounce_phi
+        tim1 -= .5 * a.bounce_time
+        phi1 -= .5 * a.bounce_phi
 
         # Easy part
-        warp_w, warp_n = self._warp_half(phi2, tim2, +1, mask)
+        present_warp = self._warp_half(phi1, tim1, -1, mask)
 
         # Compute warping
-        warp = self._warp_present(phi2, tim2, mask)
-        warp = warp_w, warp_n, warp
+        causal_warp = self._causality(phi1, tim1, mask)
 
         # Assemble
-        self._add_contribution(present_kernel, warp, mask, output=output)
+        self._add_contribution(
+            present_kernel, present_warp,
+            causal_warp, mask,
+            output=output,
+        )
 
     def _warp_half(self, phi, tim, sign, mask=None):
         """Compute the displacement warping between the past and present particle."""
@@ -593,37 +675,38 @@ class KernelElementComputer:
 
         return warp_w, warp_n
 
-    def _warp_present(self, phi2, tim2, mask=None):
+    def _causality(self, phi1, tim1, mask=None):
         """Compute the displacement warping between the past and present particle."""
         c = self._computer
         a = self._adv
 
         # Compute shifts
-        phi2 = phi2[np.newaxis, :] - self._phi[:, np.newaxis]
-        tim2 = tim2[np.newaxis, :] - self._tim[:, np.newaxis]
+        dphi = phi1[np.newaxis, :] - self._phi[:, np.newaxis]
+        dtim = tim1[np.newaxis, :] - self._tim[:, np.newaxis]
+        del phi1, tim1
 
         # Adjust in case the causality is wrong
         plt.figure()
-        plt.hist(np.ravel(np.floor(tim2 / a.bounce_time)), bins='auto')
+        plt.hist(np.ravel(np.floor(dtim / a.bounce_time)), bins='auto')
         plt.show()
 
-        count = np.zeros(tim2.shape, dtype=int)
+        count = np.zeros(dtim.shape, dtype=int)
         warp_causal = np.ones((
             self._omega.size, self._ntor.size,
-            *phi2.shape,
+            *dphi.shape,
         ), dtype=np.complex128)
         while True:
-            uncausal = tim2 < 0
+            uncausal = dtim < 0
             if not np.any(uncausal):
                 break
-            tim2 += uncausal * a.bounce_time
-            phi2 += uncausal * a.bounce_phi
+            dtim += uncausal * a.bounce_time
+            dphi += uncausal * a.bounce_phi
             count+= uncausal
             warp_causal *= self._warp_causal[:, :, np.newaxis, np.newaxis]
             assert np.all(np.isfinite(warp_causal))
             del uncausal
-        assert np.all(tim2 >= 0)
-        assert np.all(tim2 <= a.bounce_time)
+        assert np.all(dtim >= 0)
+        assert np.all(dtim <= a.bounce_time)
 
         # Compute relevant particles
         if mask is not None:
@@ -633,10 +716,11 @@ class KernelElementComputer:
 
         assert np.all(np.isfinite(warp_causal))
 
-        return warp_causal
+        return warp_causal, count
 
     def _add_contribution(
-        self, present_kernel, present_warp,
+        self, present_kernel,
+        present_warp, causal_warp,
         mask=None, *, output
     ):
         c = self._computer
@@ -653,8 +737,7 @@ class KernelElementComputer:
         else:
             bounce_warp = ravel_4(self._bounce_warp)
 
-        present_warp_w, present_warp_n, present_warp_causal = present_warp
-        present_warp_causal[:] = 1
+        present_warp_w, present_warp_n = present_warp
 
         np.who(locals())
         np.who(self.__dict__)
@@ -666,10 +749,10 @@ class KernelElementComputer:
             # w=omega, n=ntor, p=particles,
             # uv=theta vectorisation,
             # yz=both psi, hj=both theta
-            'wvp,nvp,wnuvp,nyhup,wup,wnp,zjvp->wnyhzj',
-            *present_warp,
-            past_warp, past_warp_w,
+            'wnp,nyhup,wup,wvp,nvp,zjvp->wnyhzj',
             bounce_warp,
+            past_warp, past_warp_w,
+            present_warp_w, present_warp_n,
             present_kernel,
             optimize=True,
         )
