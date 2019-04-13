@@ -403,6 +403,8 @@ class KernelElementComputer:
             + 1j * np.multiply.outer(self._ntor,  a.bounce_phi)
         )
         bounce_warp = - np.expm1(1j * bounce_dist)
+        self._warp_causal = 1 - bounce_warp
+
         np.reciprocal(bounce_warp, out=bounce_warp)
         assert np.all(np.isfinite(bounce_warp))
 
@@ -481,8 +483,16 @@ class KernelElementComputer:
         np.who(locals())
         assert np.all(np.isfinite(warp))
 
+        # Warp to reference position
+        warp_w, warp_n = \
+                self._warp_half(self._phi, self._tim, -1)
+
+        warp  = ravel_4(warp)
+        warp *= warp_n[:, np.newaxis, np.newaxis, :, :]
+
         # Position-independent quantities
         self._past_warp = warp
+        self._past_warp_w = warp_w
 
     def compute_passing(self, output):
         """This method computes the effect on the past particle at `theta2`.
@@ -499,8 +509,12 @@ class KernelElementComputer:
         present_kernel = self._interpolator.val_ker
         present_kernel = ravel_4(present_kernel) # Flatten particle axes
 
+        # Easy part
+        warp_w, warp_n = self._warp_half(self._phi, self._tim, +1)
+
         # Compute warping
         warp = self._warp_present(self._phi, self._tim)
+        warp = warp_w, warp_n, warp
 
         # Assemble
         self._add_contribution(present_kernel, warp, output=output)
@@ -548,11 +562,36 @@ class KernelElementComputer:
         tim2 -= .5 * a.bounce_time
         phi2 -= .5 * a.bounce_phi
 
+        # Easy part
+        warp_w, warp_n = self._warp_half(phi2, tim2, +1, mask)
+
         # Compute warping
         warp = self._warp_present(phi2, tim2, mask)
+        warp = warp_w, warp_n, warp
 
         # Assemble
         self._add_contribution(present_kernel, warp, mask, output=output)
+
+    def _warp_half(self, phi, tim, sign, mask=None):
+        """Compute the displacement warping between the past and present particle."""
+        c = self._computer
+        a = self._adv
+
+        # Compute relevant particles
+        if mask is not None:
+            tim = tim[..., mask]
+            phi = phi[..., mask]
+        else:
+            tim = ravel_4(tim)
+            phi = ravel_4(phi)
+
+        # Fourier-space displacement
+        warp_w = np.exp(- sign * 1j * np.multiply.outer(c._omega, tim))
+        warp_n = np.exp(+ sign * 1j * np.multiply.outer(c._ntor,  phi))
+        assert np.all(np.isfinite(warp_w))
+        assert np.all(np.isfinite(warp_n))
+
+        return warp_w, warp_n
 
     def _warp_present(self, phi2, tim2, mask=None):
         """Compute the displacement warping between the past and present particle."""
@@ -564,33 +603,37 @@ class KernelElementComputer:
         tim2 = tim2[np.newaxis, :] - self._tim[:, np.newaxis]
 
         # Adjust in case the causality is wrong
+        plt.figure()
+        plt.hist(np.ravel(np.floor(tim2 / a.bounce_time)), bins='auto')
+        plt.show()
+
+        count = np.zeros(tim2.shape, dtype=int)
+        warp_causal = np.ones((
+            self._omega.size, self._ntor.size,
+            *phi2.shape,
+        ), dtype=np.complex128)
         while True:
             uncausal = tim2 < 0
             if not np.any(uncausal):
                 break
             tim2 += uncausal * a.bounce_time
             phi2 += uncausal * a.bounce_phi
+            count+= uncausal
+            warp_causal *= self._warp_causal[:, :, np.newaxis, np.newaxis]
+            assert np.all(np.isfinite(warp_causal))
             del uncausal
         assert np.all(tim2 >= 0)
         assert np.all(tim2 <= a.bounce_time)
 
         # Compute relevant particles
         if mask is not None:
-            tim2 = tim2[..., mask]
-            phi2 = phi2[..., mask]
-            bwrp = self._bounce_warp[..., mask]
+            warp_causal = warp_causal[..., mask]
         else:
-            tim2 = ravel_4(tim2)
-            phi2 = ravel_4(phi2)
-            bwrp = ravel_4(self._bounce_warp)
+            warp_causal = ravel_4(warp_causal)
 
-        # Fourier-space displacement
-        warp_w = np.exp(- 1j * np.multiply.outer(c._omega, tim2))
-        warp_n = np.exp(+ 1j * np.multiply.outer(c._ntor,  phi2))
-        assert np.all(np.isfinite(warp_w))
-        assert np.all(np.isfinite(warp_n))
+        assert np.all(np.isfinite(warp_causal))
 
-        return warp_w, warp_n, bwrp
+        return warp_causal
 
     def _add_contribution(
         self, present_kernel, present_warp,
@@ -599,13 +642,19 @@ class KernelElementComputer:
         c = self._computer
 
         interpolator = self._interpolator
-        past_warp = self._past_warp
 
         # Compute relevant subarray
+        past_warp   = self._past_warp
+        past_warp_w = self._past_warp_w
         if mask is not None:
-            past_warp = past_warp[..., mask]
+            past_warp   = self._past_warp  [..., mask.ravel()]
+            past_warp_w = self._past_warp_w[..., mask.ravel()]
+            bounce_warp = self._bounce_warp[..., mask]
         else:
-            past_warp = ravel_4(past_warp)
+            bounce_warp = ravel_4(self._bounce_warp)
+
+        present_warp_w, present_warp_n, present_warp_causal = present_warp
+        present_warp_causal[:] = 1
 
         np.who(locals())
         np.who(self.__dict__)
@@ -617,8 +666,10 @@ class KernelElementComputer:
             # w=omega, n=ntor, p=particles,
             # uv=theta vectorisation,
             # yz=both psi, hj=both theta
-            'wuvp,nuvp,wnp,nyhup,zjvp->wnzjyh',
-            *present_warp, past_warp,
+            'wvp,nvp,wnuvp,nyhup,wup,wnp,zjvp->wnyhzj',
+            *present_warp,
+            past_warp, past_warp_w,
+            bounce_warp,
             present_kernel,
             optimize=True,
         )
