@@ -309,8 +309,8 @@ class ParticleAdvector:
         self._int_phi = spline.antiderivative()
 
         # Compute full-bounce quantities
-        bounce_time = self._int_time(2 * np.pi)
-        bounce_phi  = self._int_phi (2 * np.pi)
+        bounce_time = self._int_time(theta[-1]) - self._int_time(theta[0])
+        bounce_phi  = self._int_phi (theta[-1]) - self._int_time(theta[0])
 
         # Get positive frequencies
         bounce_sign  = np.sign(bounce_time)
@@ -319,11 +319,14 @@ class ParticleAdvector:
 
         # Add the mirror part for trapped particles
         trapped = self._trapped
-        bounce_time[trapped, :] += bounce_time[trapped, :].sum(axis=-1, keepdims=True)
-        bounce_phi [trapped, :] += bounce_phi [trapped, :].sum(axis=-1, keepdims=True)
+        bounce_time[trapped, :] = bounce_time[trapped, :].sum(axis=-1, keepdims=True)
+        bounce_phi [trapped, :] = bounce_phi [trapped, :].sum(axis=-1, keepdims=True)
 
         self._bounce_time = bounce_time
         self._bounce_phi  = bounce_phi
+
+        # Compute liveness of particles
+        self._living = interp1d(theta, self._vpar != 0, k=1)
 
     @property
     def ifreq(self):
@@ -344,6 +347,9 @@ class ParticleAdvector:
     @property
     def phi_path(self):
         return self._int_phi
+
+    def living_path(self, theta):
+        return self._living(theta)
 
     @property
     def bounce_phi(self):
@@ -494,9 +500,12 @@ class KernelElementComputer:
         self._phi = self._phi_path (theta)
         self._phi.flags.writeable = False
         self._tim = self._time_path(theta)
+        self._tim-= self._time_path(0)
         self._tim.flags.writeable = False
         self._tht = theta
         self._tht.flags.writeable = False
+
+        assert np.all(abs(self._tim) < a.bounce_time)
 
         # Interpolate past position
         interp = make_interp_kernel(
@@ -505,6 +514,9 @@ class KernelElementComputer:
             with_deriv=True,
             gyroavg=self._gyroavg,
         )
+        interp.val_ker    *= a.living_path(theta)
+        interp.dpsi_ker   *= a.living_path(theta)
+        interp.dtheta_ker *= a.living_path(theta)
 
         self._interpolator = interp
 
@@ -589,7 +601,7 @@ class KernelElementComputer:
         present_warp = self._warp_half(self._phi, self._tim, -1)
 
         # Compute warping
-        causal_warp = self._causality(self._phi, self._tim)
+        causal_warp = self._causality(self._tim)
 
         # Assemble
         self._add_contribution(
@@ -638,14 +650,14 @@ class KernelElementComputer:
         #  - from theta=0 to theta2 (+t2).
 
         # Add half-bounce to use the theta=0 crossing as a reference
-        tim1 -= .5 * a.bounce_time
-        phi1 -= .5 * a.bounce_phi
+        tim1 += .5 * a.bounce_time
+        phi1 += .5 * a.bounce_phi
 
         # Easy part
         present_warp = self._warp_half(phi1, tim1, -1, mask)
 
         # Compute warping
-        causal_warp = self._causality(phi1, tim1, mask)
+        causal_warp = self._causality(tim1, mask)
 
         # Assemble
         self._add_contribution(
@@ -675,57 +687,48 @@ class KernelElementComputer:
 
         return warp_w, warp_n
 
-    def _causality(self, phi1, tim1, mask=None):
+    def _causality(self, tim1, mask=None):
         """Compute the displacement warping between the past and present particle."""
         c = self._computer
         a = self._adv
 
         # Compute shifts
-        dphi = phi1[np.newaxis, :] - self._phi[:, np.newaxis]
         dtim = tim1[np.newaxis, :] - self._tim[:, np.newaxis]
-        del phi1, tim1
+        del tim1
 
-        # Adjust in case the causality is wrong
-        plt.figure()
-        plt.hist(np.ravel(np.floor(dtim / a.bounce_time)), bins='auto')
-        plt.show()
+        # Find non-living particles
+        both_live = a.living_path(self._tht) != 0
+        if mask is not None:
+            both_live &= mask
+        both_live = both_live[np.newaxis, :] & both_live[:, np.newaxis]
 
-        count = np.zeros(dtim.shape, dtype=int)
-        warp_causal = np.ones((
-            self._omega.size, self._ntor.size,
-            *dphi.shape,
-        ), dtype=np.complex128)
-        while True:
-            uncausal = dtim < 0
-            if not np.any(uncausal):
-                break
-            dtim += uncausal * a.bounce_time
-            dphi += uncausal * a.bounce_phi
-            count+= uncausal
-            warp_causal *= self._warp_causal[:, :, np.newaxis, np.newaxis]
-            assert np.all(np.isfinite(warp_causal))
-            del uncausal
-        assert np.all(dtim >= 0)
-        assert np.all(dtim <= a.bounce_time)
+        # Remove non-living particles from count
+        dtim[~both_live] = 0
+
+        # Sanity check for unhandled cases
+        assert np.all(dtim < a.bounce_time)
+        assert np.all(dtim >= -a.bounce_time)
+
+        # Compute the numbre of elements to add/remove
+        count = dtim < 0
 
         # Compute relevant particles
         if mask is not None:
-            warp_causal = warp_causal[..., mask]
+            count = count[..., mask]
         else:
-            warp_causal = ravel_4(warp_causal)
+            count = ravel_4(count)
 
-        assert np.all(np.isfinite(warp_causal))
-
-        return warp_causal, count
+        return count
 
     def _add_contribution(
         self, present_kernel,
-        present_warp, causal_warp,
-        mask=None, *, output
+        present_warp, causal_count,
+        *, output, mask=None,
     ):
+        """Integrate on the two particles trajectories to yield the required
+        function.
+        """
         c = self._computer
-
-        interpolator = self._interpolator
 
         # Compute relevant subarray
         past_warp   = self._past_warp
@@ -739,12 +742,7 @@ class KernelElementComputer:
 
         present_warp_w, present_warp_n = present_warp
 
-        np.who(locals())
-        np.who(self.__dict__)
-        np.who(interpolator.__dict__)
-
         # Sum all the things!
-        print('ES')
         source = np.einsum(
             # w=omega, n=ntor, p=particles,
             # uv=theta vectorisation,
@@ -757,9 +755,26 @@ class KernelElementComputer:
             optimize=True,
         )
         assert np.all(np.isfinite(source))
-        np.who(locals())
+
+        # Remove uncausal elements
+        if causal_count.any():
+            source -= np.einsum(
+                # w=omega, n=ntor, p=particles,
+                # uv=theta vectorisation,
+                # yz=both psi, hj=both theta
+                'nyhup,wup,wvp,nvp,zjvp,uvp->wnyhzj',
+                past_warp,
+                past_warp_w,
+                present_warp_w,
+                present_warp_n,
+                present_kernel,
+                causal_count,
+                optimize=True,
+            )
+            assert np.all(np.isfinite(source))
 
         print('ACC')
+        interpolator = self._interpolator
         output[
             :, :,
             interpolator.psi_slice, interpolator.theta_slice,
