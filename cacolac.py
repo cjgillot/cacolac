@@ -421,8 +421,11 @@ class KernelElementComputer:
         # Interpolation path at past position
         psi = self._psi_path (theta)
         self._phi = self._phi_path (theta)
+        self._phi.flags.writeable = False
         self._tim = self._time_path(theta)
+        self._tim.flags.writeable = False
         self._tht = theta
+        self._tht.flags.writeable = False
 
         # Interpolate past position
         interp = make_interp_kernel(
@@ -494,7 +497,7 @@ class KernelElementComputer:
 
         # Interpolate present point
         present_kernel = self._interpolator.val_ker
-        present_kernel = ravel_4(present_kernel)
+        present_kernel = ravel_4(present_kernel) # Flatten particle axes
 
         # Compute warping
         warp = self._warp_present(self._phi, self._tim)
@@ -516,17 +519,19 @@ class KernelElementComputer:
         c = self._computer
         a = self._adv
 
-        # Interpolation path at present position
-        swap = np.s_[..., [1,0]]
-        phi2 = self._phi[swap]
-        tim2 = self._tim[swap]
-
         # Only select trapped particles
         mask = np.repeat(a.trapped[..., np.newaxis], 2, axis=-1)
+        # Select the other side of the bounce
+        # as the symmetric particle wrt. velocity sign.
+        swap = np.s_[..., ::-1]
 
         # Interpolate present point
         present_kernel = self._interpolator.val_ker
-        present_kernel = present_kernel[..., mask]
+        present_kernel = present_kernel[swap][..., mask]
+
+        # Interpolation path at present position
+        phi2 = self._phi[swap].copy()
+        tim2 = self._tim[swap].copy()
 
         # The computation of the elapsed time is done as follows:
         # Consider the trajectory
@@ -554,9 +559,9 @@ class KernelElementComputer:
         c = self._computer
         a = self._adv
 
+        # Compute shifts
         phi2 = phi2[np.newaxis, :] - self._phi[:, np.newaxis]
         tim2 = tim2[np.newaxis, :] - self._tim[:, np.newaxis]
-        bwrp = self._bounce_warp[..., np.newaxis, np.newaxis, :, :, :, :]
 
         # Adjust in case the causality is wrong
         while True:
@@ -573,24 +578,19 @@ class KernelElementComputer:
         if mask is not None:
             tim2 = tim2[..., mask]
             phi2 = phi2[..., mask]
-            bwrp = bwrp[..., mask]
+            bwrp = self._bounce_warp[..., mask]
         else:
             tim2 = ravel_4(tim2)
             phi2 = ravel_4(phi2)
-            bwrp = ravel_4(bwrp)
+            bwrp = ravel_4(self._bounce_warp)
 
         # Fourier-space displacement
-        dist = (
-            - np.multiply.outer(self._omega, tim2)
-            + np.multiply.outer(self._ntor,  phi2)
-        )
-        warp = np.exp(1j * dist)
-        assert np.all(np.isfinite(warp))
+        warp_w = np.exp(- 1j * np.multiply.outer(c._omega, tim2))
+        warp_n = np.exp(+ 1j * np.multiply.outer(c._ntor,  phi2))
+        assert np.all(np.isfinite(warp_w))
+        assert np.all(np.isfinite(warp_n))
 
-        # Periodicity effect
-        warp *= bwrp
-
-        return warp
+        return warp_w, warp_n, bwrp
 
     def _add_contribution(
         self, present_kernel, present_warp,
@@ -617,8 +617,8 @@ class KernelElementComputer:
             # w=omega, n=ntor, p=particles,
             # uv=theta vectorisation,
             # yz=both psi, hj=both theta
-            'wnuvp,nyhup,zjvp->wnyzhj',
-            present_warp, past_warp,
+            'wuvp,nuvp,wnp,nyhup,zjvp->wnzjyh',
+            *present_warp, past_warp,
             present_kernel,
             optimize=True,
         )
