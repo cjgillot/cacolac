@@ -628,8 +628,8 @@ class KernelElementComputer:
         print('ACC')
         output[
             :, :,
-            interpolator.psi_slice, interpolator.psi_slice,
-            interpolator.theta_slice, interpolator.theta_slice
+            interpolator.psi_slice, interpolator.theta_slice,
+            interpolator.psi_slice, interpolator.theta_slice,
         ] += source
 
 class KernelComputer:
@@ -773,7 +773,7 @@ def main():
     print(abs(out).min(), abs(out).max())
 
     plt.pcolormesh(
-        abs(out[0, 5].transpose(0, 2, 1, 3).reshape(13*19, 13*19)),
+        abs(out[0, -1].reshape(13*19, 13*19)),
 #         norm=mpl.colors.LogNorm(),
     )
     plt.colorbar()
