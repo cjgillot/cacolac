@@ -27,13 +27,6 @@ Future directions:
 import numpy as np
 from scipy.interpolate import make_interp_spline as interp1d
 
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-# %matplotlib inline
-plt.ion()
-
-mpl.rcParams['figure.figsize'] = 10, 5
-
 class ParticleAdvector:
     def __init__(self, grid, pot):
         self._grid = grid
@@ -65,47 +58,28 @@ class ParticleAdvector:
 
         shape = np.broadcast(psi, g.theta, g.mu, vpar).shape
 
-        np.who(locals())
-
         for _ in range(3):
             vpar_old, psi_old = vpar, psi
 
             r = g.radius_at(psi)
             Rred = 1 + r/R0 * np.cos(g.theta)
 
-            if False:
-                err = np.zeros(shape + (2,))
-                err[..., 0] = - ltor + psi - A/Z * R0 * Rred * vpar
-                err[..., 1] = - ener + g.vpar**2 + 2/A * g.mu / Rred + 2*Z/A * P(psi)
+            vpar2 = ener - 2/A * g.mu / Rred - 2*Z/A * P(psi)
+            vpar2 = np.clip(vpar2, 0, None)
+            vpar = sign * np.sqrt(vpar2)
+            psi = ltor + A/Z * R0 * Rred * vpar
 
-                jac = np.zeros(shape + (2, 2))
-                jac[..., 0, 0] = 1 - A/Z * np.cos(g.theta) * vpar
-                jac[..., 0, 1] = - A/Z * R0 * Rred
-                jac[..., 1, 0] = - 2/A/R0 * g.mu * (np.cos(g.theta) / Rred**2)\
-                                 + 2*Z/A * P(psi, nu=1)
-                jac[..., 1, 1] = 2 * g.vpar
-
-                diff = np.linalg.solve(jac, err)
-                psi  -= diff[..., 0]
-                vpar -= diff[..., 1]
-
-            else:
-                vpar2 = ener - 2/A * g.mu / Rred - 2*Z/A * P(psi)
-                vpar2 = np.clip(vpar2, 0, None)
-                vpar = sign * np.sqrt(vpar2)
-                psi = ltor + A/Z * R0 * Rred * vpar
-
-                # Anchor at slowest position.
-                # This allows to have the same anchor the two sides of a
-                # trapped particle, while controlling the error for passing
-                # particles.
-                avg_psi = np.take_along_axis(
-                    psi,
-                    np.argmin(abs(vpar), axis=0)[np.newaxis],
-                    axis=0,
-                )
-                psi -= avg_psi
-                psi += g.psi
+            # Anchor at slowest position.
+            # This allows to have the same anchor the two sides of a
+            # trapped particle, while controlling the error for passing
+            # particles.
+            avg_psi = np.take_along_axis(
+                psi,
+                np.argmin(abs(vpar), axis=0)[np.newaxis],
+                axis=0,
+            )
+            psi -= avg_psi
+            psi += g.psi
 
             if np.allclose(vpar_old, vpar) and np.allclose(psi_old, psi):
                 break
@@ -131,7 +105,7 @@ class ParticleAdvector:
         theta = self._grid.theta.squeeze()
 
         vtheta  = self._vpar / (q * g.R0 * self._Rred)
-        vtheta += self._pot(self._psi, nu=1)
+        vtheta += self._pot(self._psi, nu=1) * self._Rred / q
         # FIXME Add vD.gradtheta
 
         ifreq = 1/vtheta
@@ -142,7 +116,6 @@ class ParticleAdvector:
 
         vphi  = self._vpar / (g.R0 * self._Rred)
         # FIXME Add vE.gradphi
-        # FIXME Add vD.gradphi
 
         self._vphi = vphi
         spline = interp1d(theta, vphi * ifreq)
@@ -177,6 +150,10 @@ class ParticleAdvector:
         return self._psi
 
     @property
+    def vpar_path(self):
+        return self._vpar
+
+    @property
     def time_path(self):
         return self._int_time
 
@@ -200,6 +177,9 @@ class ParticleAdvector:
         return self._trapped
 
 def main():
+    from grid import Grid
+
+    # General parameters
     A = Z = 1
     R0 = 900
 
@@ -207,11 +187,11 @@ def main():
     rg = np.linspace(100, 150, 18)
     qq = 1.3 + 0*np.linspace(0, 1, rg.size)**2
 
-    theta = np.linspace(- np.pi, np.pi, 41)
+    theta = np.linspace(- np.pi, np.pi, 141)
     vpar = np.multiply.outer(np.linspace(.1, 4, 12), [1, -1])
     mu = np.linspace(0, 1, 8)
 
-    grid = Grid(1, 1, 900, rg, qq, theta, vpar, mu)
+    grid = Grid(A, Z, R0, rg, qq, theta, vpar, mu)
     np.who(grid.__dict__)
 
     # Advect particles
@@ -222,9 +202,9 @@ def main():
 
     plt.figure()
     plt.subplot(121)
-    plt.plot(theta, adv._r[:, 16].reshape(theta.size, -1))
+    plt.plot(theta, adv.psi_path[:, 16].reshape(theta.size, -1))
     plt.subplot(122)
-    plt.plot(theta, adv._vpar[:, 16].reshape(theta.size, -1))
+    plt.plot(theta, adv.vpar_path[:, 16].reshape(theta.size, -1))
     plt.show()
 
     # Compute trajectory timing
@@ -247,10 +227,17 @@ def main():
     plt.show()
 
 if __name__ == '__main__':
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+    plt.ion()
+
+    mpl.rcParams['figure.figsize'] = 10, 5
+
     try:
         main()
     except Exception as e:
         import traceback
         print(traceback.format_exc())
+        raise
     finally:
         plt.show(block=True)
