@@ -32,6 +32,58 @@ class ParticleAdvector:
         self._grid = grid
         self._pot = interp1d(grid.psi.squeeze(), pot)
 
+    def compute_bounce_point(self):
+        """
+        This method computed the position of the banana tip.
+
+        More specifically, we want to compute `theta_b`
+        of the particle, parametrized by:
+        - the average position `psi` ;
+        - the parallel velocity `vpar` ;
+        - the magnetic momentum `mu`.
+        """
+        g = self._grid
+        A = g.A; Z = g.Z; R0 = g.R0
+
+        theta= g.theta
+        vpar = g.vpar[..., [0]]
+        psi  = g.psi
+        r    = g.radius
+        Rred = 1 + r/R0 * np.cos(theta)
+        P    = self._pot(psi)
+
+        ener = A/2 * vpar**2 + g.mu/(1 + r/R0) + Z*P
+        np.who(locals())
+
+        vEloc = self._pot(psi, nu=1)
+        vDloc = - np.cos(theta)/(R0 * Rred) *\
+                g.qprofile/r *\
+                (2*ener - g.mu/Rred - 2*Z*P)/Z
+
+        drift = - g.R0 * Rred * (vEloc + vDloc)
+
+        lowener = A/2 * drift**2 + g.mu/Rred + Z*P - ener
+        grdener = np.diff(lowener, axis=0) / np.diff(theta, axis=0)
+
+        bounce = lowener > 0
+        bounce = bounce[1:] ^ bounce[:-1]
+
+        hb_idx = np.argmax(bounce & (theta[ :-1] >= 0), axis=0)
+        lb_idx = np.argmax(bounce & (theta[1:  ] <= 0), axis=0)
+
+        hb = theta.squeeze()[hb_idx]
+        lb = theta.squeeze()[lb_idx]
+        hb[hb_idx == 0] = np.nan
+        lb[lb_idx == 0] = np.nan
+
+        self._bounce_pos = np.concatenate((hb, lb), axis=-1)
+        self._trapped    = hb_idx != 0
+
+        hd = np.take_along_axis(drift, hb_idx[np.newaxis], axis=0)[0]
+        ld = np.take_along_axis(drift, lb_idx[np.newaxis], axis=0)[0]
+
+        return np.concatenate((hd, ld), axis=-1)
+
     def compute_trajectory(self):
         """
         This method computes the path of a trapped or passing particle.
