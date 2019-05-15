@@ -25,6 +25,7 @@ Future directions:
 """
 
 import numpy as np
+import scipy.optimize
 from scipy.interpolate import make_interp_spline as interp1d
 
 class ParticleAdvector:
@@ -52,15 +53,10 @@ class ParticleAdvector:
         Rred = 1 + r/R0 * np.cos(theta)
         P    = self._pot(psi)
 
-        ener = A/2 * vpar**2 + g.mu/(1 + r/R0) + Z*P
-        np.who(locals())
+        ener  = A/2 * vpar**2 + g.mu/(1 + r/R0) + Z*P
+        drift = self.compute_thetadrift_Bstar(psi, theta)
+        drift = - g.R0 * Rred * drift
 
-        vEloc = self._pot(psi, nu=1)
-        vDloc = - np.cos(theta)/(R0 * Rred) *\
-                g.qprofile/r *\
-                (2*ener - g.mu/Rred - 2*Z*P)/Z
-
-        drift = - g.R0 * Rred * (vEloc + vDloc)
 
         lowener = A/2 * drift**2 + g.mu/Rred + Z*P - ener
         grdener = np.diff(lowener, axis=0) / np.diff(theta, axis=0)
@@ -96,45 +92,62 @@ class ParticleAdvector:
         """
         g = self._grid
         A = g.A; Z = g.Z; R0 = g.R0
-        P = self._pot
+        shape = np.broadcast(g.psi, g.theta, g.vpar, g.mu).shape
 
-        sign = g.sign
+        def fval(psi):
+            psi = psi.reshape(shape)
+            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(g.theta)
+            V = Z/A/R0 * (ltor - psi) / Rred
+            P = self._pot(psi.real)
+            E = A/2 * V**2 + g.mu / Rred + Z * P - ener
+            return E.ravel().clip(-maxerr, maxerr)
+        def fprime(psi):
+            psi = psi.reshape(shape)
+            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(g.theta)
+            dRr_dy = g.radius_at(psi.real, nu=1)/R0 * np.cos(g.theta)
 
-        vpar = g.vpar
-        psi  = g.psi
-        r    = g.radius
-        Rred = 1 + r/R0
+            V = Z/A/R0 * (ltor - psi) / Rred
+            dV_dy = - Z/A/R0 / Rred - V * dRr_dy/Rred
+            dP_dy = self._pot(psi.real, nu=1)
+            dE_dy = A * V * dV_dy
+            dE_dy = dE_dy - g.mu * dRr_dy/Rred**2
+            dE_dy = dE_dy + Z * dP_dy
+            return dE_dy.ravel()
 
-        ener = g.vpar**2 + 2/A / Rred * g.mu + 2*Z/A * P(psi)
-        ltor = psi - A/Z * R0 * Rred * vpar
+        Rred = 1 + g.radius/R0
+        ener = A/2 * g.vpar**2 + g.mu/Rred + Z * self._pot(g.psi)
+        del Rred
 
-        shape = np.broadcast(psi, g.theta, g.mu, vpar).shape
+        Rred  = 1 + g.radius/R0 * np.cos(g.theta)
+        vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
+        vpar0 = g.sign * np.sqrt(2/A) * np.sqrt(vp2.clip(0, None))
 
-        for _ in range(3):
-            vpar_old, psi_old = vpar, psi
+        trapped = vp2.min(axis=0) < 0
+        assert np.all(trapped[..., 0] == trapped[..., 1])
 
-            r = g.radius_at(psi)
-            Rred = 1 + r/R0 * np.cos(g.theta)
+        ltor = np.empty(shape[1:])
+        ltor[:] = g.psi.squeeze(axis=0)
+        ltor[~trapped] += A/Z * R0 * np.mean(Rred * vpar0, axis=0)[~trapped]
 
-            vpar2 = ener - 2/A * g.mu / Rred - 2*Z/A * P(psi)
-            vpar2 = np.clip(vpar2, 0, None)
-            vpar = sign * np.sqrt(vpar2)
-            psi = ltor + A/Z * R0 * Rred * vpar
+        vpar0[~np.isfinite(vpar0)] = 0
+        psi0 = ltor - A/Z * R0 * Rred * vpar0
+        del Rred, vp2, trapped
 
-            # Anchor at slowest position.
-            # This allows to have the same anchor the two sides of a
-            # trapped particle, while controlling the error for passing
-            # particles.
-            avg_psi = np.take_along_axis(
-                psi,
-                np.argmin(abs(vpar), axis=0)[np.newaxis],
-                axis=0,
-            )
-            psi -= avg_psi
-            psi += g.psi
+        maxerr = np.inf
+        maxerr = abs(fval(psi0)).max(axis=0)
 
-            if np.allclose(vpar_old, vpar) and np.allclose(psi_old, psi):
-                break
+        psi = scipy.optimize.zeros.newton(
+            func=fval, fprime=fprime,
+            x0=psi0.copy().ravel(),
+            maxiter=10,
+        )
+        solerr  = np.logical_not(abs(fval(psi)) < 1e-5 * maxerr)
+        solerr |= psi < 0
+        psi[solerr] = psi0.ravel()[solerr]
+        psi = psi.reshape(shape)
+        r = g.radius_at(psi)
+        Rred = 1 + r/R0 * np.cos(g.theta)
+        vpar = (ltor - psi) * Z/A/R0 / Rred
 
         assert np.all(np.isfinite(psi))
         assert np.all(np.isfinite(r))
@@ -144,12 +157,14 @@ class ParticleAdvector:
         self._vpar = vpar
         self._Rred = Rred
 
+        vp2 = ener - g.mu/Rred - Z * self._pot(psi)
+
         # Compute trapped particles
-        trapped = np.any(vpar == 0, axis=0, keepdims=True) & g.mu.astype(bool)
-        if g.vpar.squeeze().ndim == 2:
-            assert np.all(trapped[..., 0] == trapped[..., 1])
-            trapped = trapped[..., 0]
+        trapped = np.any(vp2 < 0, axis=(0, -1), keepdims=True)\
+                & g.mu.astype(bool)
         self._trapped = trapped.squeeze()
+
+        self._trap_support = vp2 > 0
 
     def compute_freq(self):
         g = self._grid
