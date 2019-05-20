@@ -92,19 +92,24 @@ class ParticleAdvector:
         """
         g = self._grid
         A = g.A; Z = g.Z; R0 = g.R0
-        shape = np.broadcast(g.psi, g.theta, g.vpar, g.mu).shape
+        theta = g.theta
+        theta = np.concatenate([
+            theta,
+            .5 * (theta[1:] + theta[:-1])
+        ], axis=0)
+        shape = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
 
         def fval(psi):
             psi = psi.reshape(shape)
-            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(g.theta)
+            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(theta)
             V = Z/A/R0 * (ltor - psi) / Rred
             P = self._pot(psi.real)
             E = A/2 * V**2 + g.mu / Rred + Z * P - ener
             return E.ravel().clip(-maxerr, maxerr)
         def fprime(psi):
             psi = psi.reshape(shape)
-            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(g.theta)
-            dRr_dy = g.radius_at(psi.real, nu=1)/R0 * np.cos(g.theta)
+            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(theta)
+            dRr_dy = g.radius_at(psi.real, nu=1)/R0 * np.cos(theta)
 
             V = Z/A/R0 * (ltor - psi) / Rred
             dV_dy = - Z/A/R0 / Rred - V * dRr_dy/Rred
@@ -118,7 +123,7 @@ class ParticleAdvector:
         ener = A/2 * g.vpar**2 + g.mu/Rred + Z * self._pot(g.psi)
         del Rred
 
-        Rred  = 1 + g.radius/R0 * np.cos(g.theta)
+        Rred  = 1 + g.radius/R0 * np.cos(theta)
         vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
         vpar0 = g.sign * np.sqrt(2/A) * np.sqrt(vp2.clip(0, None))
 
@@ -146,16 +151,21 @@ class ParticleAdvector:
         psi[solerr] = psi0.ravel()[solerr]
         psi = psi.reshape(shape)
         r = g.radius_at(psi)
-        Rred = 1 + r/R0 * np.cos(g.theta)
+        Rred = 1 + r/R0 * np.cos(theta)
         vpar = (ltor - psi) * Z/A/R0 / Rred
 
         assert np.all(np.isfinite(psi))
         assert np.all(np.isfinite(r))
         assert np.all(np.isfinite(vpar))
-        self._psi = psi
-        self._r = r
-        self._vpar = vpar
-        self._Rred = Rred
+        thsz = g.theta.size
+        self._psi  = psi [:thsz]
+        self._r    = r   [:thsz]
+        self._vpar = vpar[:thsz]
+        self._Rred = Rred[:thsz]
+        self._mid_psi  = psi [thsz:]
+        self._mid_r    = r   [thsz:]
+        self._mid_vpar = vpar[thsz:]
+        self._mid_Rred = Rred[thsz:]
 
         vp2 = ener - g.mu/Rred - Z * self._pot(psi)
 
