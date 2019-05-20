@@ -33,6 +33,25 @@ class ParticleAdvector:
         self._grid = grid
         self._pot = interp1d(grid.psi.squeeze(), pot)
 
+    def compute_thetadrift_Bstar(self, psi, theta):
+        g = self._grid
+        A = g.A; Z = g.Z; R0 = g.R0
+
+        vpar = g.vpar[..., [0]]
+        r    = g.radius
+        Rred = 1 + r/R0 * np.cos(theta)
+        P    = self._pot(psi)
+
+        ener = A/2 * vpar**2 + g.mu/(1 + r/R0) + Z*P
+        np.who(locals())
+
+        vEloc = self._pot(psi, nu=1)
+        vDloc = - np.cos(theta)/(R0 * Rred) *\
+                g.qprofile/r *\
+                (2*ener - g.mu/Rred - 2*Z*P)/Z
+
+        return vEloc + vDloc
+
     def compute_bounce_point(self):
         """
         This method computed the position of the banana tip.
