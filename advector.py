@@ -28,6 +28,51 @@ import numpy as np
 import scipy.optimize
 from scipy.interpolate import make_interp_spline as interp1d
 
+class Energy:
+    def __init__(self, grid, shape, pot, ener, ltor):
+        self._grid = grid
+        self._shape = shape
+        self._pot = pot
+        self._ener = ener
+        self._ltor = ltor
+        self._maxerr = None
+        self._ZAR = grid.Z/grid.A/grid.R0
+
+    def set_maxerr(self, maxerr):
+        self._maxerr = maxerr
+
+    def value(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        U = self._ZAR * (self._ltor - psi)
+        P = self._pot(psi)
+        E = g.A/2 * U**2 / Rred**2 + g.mu / Rred + g.Z * P - self._ener
+        E = E.ravel()
+        if self._maxerr is not None:
+            maxerr = self._maxerr
+            E = E.clip(-maxerr, maxerr)
+        return E
+
+    def dpsi(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dU_dy = - self._ZAR
+        dP_dy = self._pot(psi, nu=1)
+        dE_dy = (
+            g.A * U * dU_dy/Rred**2
+            - g.A * U**2 * dRr_dy/Rred**3
+            - g.mu * dRr_dy/Rred**2
+            + g.Z * dP_dy
+        )
+        return dE_dy.ravel()
+
 class ParticleAdvector:
     def __init__(self, grid, pot):
         self._grid = grid
@@ -142,26 +187,6 @@ class ParticleAdvector:
         ], axis=0)
         shape = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
 
-        def fval(psi):
-            psi = psi.reshape(shape)
-            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(theta)
-            V = Z/A/R0 * (ltor - psi) / Rred
-            P = self._pot(psi.real)
-            E = A/2 * V**2 + g.mu / Rred + Z * P - ener
-            return E.ravel().clip(-maxerr, maxerr)
-        def fprime(psi):
-            psi = psi.reshape(shape)
-            Rred = 1 + g.radius_at(psi.real)/R0 * np.cos(theta)
-            dRr_dy = g.radius_at(psi.real, nu=1)/R0 * np.cos(theta)
-
-            V = Z/A/R0 * (ltor - psi) / Rred
-            dV_dy = - Z/A/R0 / Rred - V * dRr_dy/Rred
-            dP_dy = self._pot(psi.real, nu=1)
-            dE_dy = A * V * dV_dy
-            dE_dy = dE_dy - g.mu * dRr_dy/Rred**2
-            dE_dy = dE_dy + Z * dP_dy
-            return dE_dy.ravel()
-
         ener = self._ener
         ltor = self._ltor
 
@@ -171,15 +196,23 @@ class ParticleAdvector:
         psi0  = ltor - A/Z * R0 * Rred * vpar0
         del Rred, vp2
 
+        computer = Energy(
+            self._grid, shape,
+            self._pot, self._ener, self._ltor
+        )
+
         maxerr = np.inf
-        maxerr = abs(fval(psi0)).max(axis=0)
+        maxerr = abs(computer.value(psi0, theta)).max(axis=0)
+
+        computer.set_maxerr(maxerr)
 
         psi = scipy.optimize.zeros.newton(
-            func=fval, fprime=fprime,
+            func=computer.value, fprime=computer.dpsi,
             x0=psi0.copy().ravel(),
+            args=(theta,),
             maxiter=10,
         )
-        solerr  = np.logical_not(abs(fval(psi)) < 1e-5 * maxerr)
+        solerr  = np.logical_not(abs(computer.value(psi, theta)) < 1e-5 * maxerr)
         solerr |= psi < 0
         psi[solerr] = psi0.ravel()[solerr]
         psi = psi.reshape(shape)
