@@ -33,6 +33,30 @@ class ParticleAdvector:
         self._grid = grid
         self._pot = interp1d(grid.psi.squeeze(), pot)
 
+    def compute_invariants(self):
+        g = self._grid
+        A = g.A; Z = g.Z; R0 = g.R0
+        shape = np.broadcast(g.psi, g.vpar, g.mu).shape
+
+        Rred = 1 + g.radius/R0
+        ener = A/2 * g.vpar**2 + g.mu/Rred + Z * self._pot(g.psi)
+        del Rred
+
+        Rred  = 1 + g.radius/R0 * np.cos(g.theta)
+        vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
+        vpar0 = g.sign * np.sqrt(2/A) * np.sqrt(vp2.clip(0, None))
+
+        trapped = vp2.min(axis=0) < 0
+        assert np.all(trapped[..., 0] == trapped[..., 1])
+
+        ltor = np.empty(shape[1:])
+        ltor[:] = g.psi.squeeze(axis=0)
+        ltor[~trapped] += A/Z * R0 * np.mean(Rred * vpar0, axis=0)[~trapped]
+
+        self._ener = ener
+        self._ltor = ltor
+        self._trapped = trapped
+
     def compute_thetadrift_Bstar(self, psi, theta):
         g = self._grid
         A = g.A; Z = g.Z; R0 = g.R0
@@ -138,24 +162,14 @@ class ParticleAdvector:
             dE_dy = dE_dy + Z * dP_dy
             return dE_dy.ravel()
 
-        Rred = 1 + g.radius/R0
-        ener = A/2 * g.vpar**2 + g.mu/Rred + Z * self._pot(g.psi)
-        del Rred
+        ener = self._ener
+        ltor = self._ltor
 
         Rred  = 1 + g.radius/R0 * np.cos(theta)
         vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
         vpar0 = g.sign * np.sqrt(2/A) * np.sqrt(vp2.clip(0, None))
-
-        trapped = vp2.min(axis=0) < 0
-        assert np.all(trapped[..., 0] == trapped[..., 1])
-
-        ltor = np.empty(shape[1:])
-        ltor[:] = g.psi.squeeze(axis=0)
-        ltor[~trapped] += A/Z * R0 * np.mean(Rred * vpar0, axis=0)[~trapped]
-
-        vpar0[~np.isfinite(vpar0)] = 0
-        psi0 = ltor - A/Z * R0 * Rred * vpar0
-        del Rred, vp2, trapped
+        psi0  = ltor - A/Z * R0 * Rred * vpar0
+        del Rred, vp2
 
         maxerr = np.inf
         maxerr = abs(fval(psi0)).max(axis=0)
@@ -293,6 +307,7 @@ def main():
     # Advect particles
     pot = np.zeros_like(rg)
     adv = ParticleAdvector(grid, pot)
+    adv.compute_invariants()
     adv.compute_trajectory()
     np.who(adv.__dict__)
 
