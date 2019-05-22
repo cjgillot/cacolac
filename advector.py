@@ -244,11 +244,9 @@ class ParticleAdvector:
         """
         g = self._grid
         A = g.A; Z = g.Z; R0 = g.R0
-        theta = g.theta
-        theta = np.concatenate([
-            theta,
-            .5 * (theta[1:] + theta[:-1])
-        ], axis=0)
+        theta = np.empty((2*g.theta.size-1,) + g.theta.shape[1:])
+        theta[0::2] = g.theta
+        theta[1::2] = .5 * (g.theta[1:] + g.theta[:-1])
         shape = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
 
         ener = self._ener
@@ -266,7 +264,7 @@ class ParticleAdvector:
         )
 
         maxerr = np.inf
-        maxerr = abs(computer.value(psi0, theta)).max(axis=0)
+        maxerr = abs(computer.value(psi0, theta)).max()
 
         computer.set_maxerr(maxerr)
 
@@ -287,18 +285,109 @@ class ParticleAdvector:
         assert np.all(np.isfinite(psi))
         assert np.all(np.isfinite(r))
         assert np.all(np.isfinite(vpar))
-        thsz = g.theta.size
-        self._psi  = psi [:thsz]
-        self._r    = r   [:thsz]
-        self._vpar = vpar[:thsz]
-        self._Rred = Rred[:thsz]
-        self._mid_psi  = psi [thsz:]
-        self._mid_r    = r   [thsz:]
-        self._mid_vpar = vpar[thsz:]
-        self._mid_Rred = Rred[thsz:]
+        self._psi  = psi [0::2]
+        self._r    = r   [0::2]
+        self._vpar = vpar[0::2]
+        self._Rred = Rred[0::2]
+        self._mid_psi  = psi [1::2]
+        self._mid_r    = r   [1::2]
+        self._mid_vpar = vpar[1::2]
+        self._mid_Rred = Rred[1::2]
 
+    def compute_time(self):
+        g = self._grid
+        A = g.A; Z = g.Z; R0 = g.R0
+        theta = g.theta
+        theta = .5 * (theta[1:] + theta[:-1])
+        shape = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
 
+        ltor = self._ltor
+        psi  = self._mid_psi
+        r    = self._mid_r
 
+        computer = Energy(
+            self._grid, shape,
+            self._pot, self._ener, self._ltor
+        )
+        dE_dy = computer.dpsi(self._mid_psi, theta).reshape(shape)
+
+        U = Z/A/R0 * (ltor - psi)
+        dU_dy = - Z/A/R0
+
+        q = g.qprofile_at(psi)
+        Rred = 1 + r/R0 * np.cos(theta)
+        dRr_dy = g.radius_at(psi.real, nu=1)/R0 * np.cos(theta)
+
+        H = A/g.R0 * r**2/(q * Rred)
+        dH_dy = (
+            2 * g.radius_at(psi, nu=1)
+            - r * g.qprofile_at(psi, nu=1)/q
+            - r * dRr_dy/Rred
+        ) * A/g.R0 * r/(q * Rred)
+
+        dPtheta_dy = dU_dy * H + U * dH_dy - Z * q
+
+        dt_dtheta = dPtheta_dy / dE_dy
+
+        np.who(locals())
+        plt.figure()
+        plt.subplot(131)
+        plt.plot(theta.squeeze(), dPtheta_dy[:, 16].reshape(theta.size, -1))
+        plt.subplot(132)
+        plt.plot(theta.squeeze(), dE_dy[:, 16].reshape(theta.size, -1))
+        plt.subplot(133)
+        plt.plot(theta.squeeze(), dt_dtheta[:, 16].reshape(theta.size, -1))
+        plt.ylim(-1e4, 1e4)
+        plt.show(block=False)
+
+        dt_dtheta = self._regularize_trapped(theta, dt_dtheta)
+
+    def _regularize_trapped(self, theta, dt_dtheta):
+        """Trapped trajectories need some regularisation near the banana tips.
+        """
+        g = self._grid
+        theta   = theta.squeeze()
+        trapped = self._trapped
+        dtheta  = np.diff(theta).mean()
+
+        plt.figure()
+        plt.subplot(141)
+        plt.plot(theta, dt_dtheta[:, trapped].reshape(theta.size, -1))
+        plt.ylim(-1e4, 1e4)
+
+        uptip = self._banana_theta[..., 0].copy()
+        dwtip = self._banana_theta[..., 1].copy()
+
+        # Restrict to trapped support
+        dt_dtheta[:, trapped] *= np.less.outer(theta, uptip)[..., np.newaxis]
+        dt_dtheta[:, trapped] *= np.greater.outer(theta, dwtip)[..., np.newaxis]
+
+        uptip_idx = theta.searchsorted(uptip, 'left')
+        dwtip_idx = theta.searchsorted(dwtip, 'right')
+        uptip -= theta[uptip_idx-1]
+        dwtip -= theta[dwtip_idx  ]
+
+        dt_dtheta[uptip_idx, trapped].T[:] *= 2 * (uptip / dtheta)
+        dt_dtheta[dwtip_idx, trapped].T[:] *= 2 * (- dwtip / dtheta)
+
+        # Integrate time series
+        theta     = g.theta.squeeze()
+        time      = np.zeros((theta.size, *dt_dtheta.shape[1:]))
+        time[1:]  = np.cumsum(dt_dtheta, axis=0)
+        time[1:] *= np.diff(theta)[:, np.newaxis, np.newaxis, np.newaxis, np.newaxis]
+        time     -= time[theta.searchsorted(0)]
+
+        plt.subplot(142)
+        plt.plot(theta[:-1], dt_dtheta[:, trapped].reshape(theta.size-1, -1))
+        plt.subplot(143)
+        plt.plot(theta, time[:, 16].reshape(theta.size, -1))
+        plt.subplot(144)
+        plt.plot(theta, (
+            (time * g.vpar)[:, trapped]
+        ).reshape(theta.size, -1))
+        plt.show(block=False)
+
+        return dt_dtheta
 
     def compute_freq(self):
         g = self._grid
