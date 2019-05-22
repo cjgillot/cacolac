@@ -73,6 +73,62 @@ class Energy:
         )
         return dE_dy.ravel()
 
+    def dtheta(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        dRr_dj = - g.radius_at(psi)/g.R0 * np.sin(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dE_dj = (
+            - g.A * U**2 * dRr_dj/Rred**3
+            - g.mu * dRr_dj/Rred**2
+        )
+        return dE_dj.ravel()
+
+    def dpsidpsi(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
+        d2Rr_dydy = g.radius_at(psi, nu=2)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dU_dy = - self._ZAR
+        d2P_dydy = self._pot(psi, nu=2)
+        d2E_dydy = (
+            g.A * dU_dy**2 /Rred**2
+            - 2 * g.A * U * dU_dy * dRr_dy/Rred**3
+            + 3 * g.A * U**2 * dRr_dy**2/Rred**4
+            - g.A * U**2 * d2Rr_dydy/Rred**3
+            + 2 * g.mu * dRr_dy**2/Rred**3
+            - g.mu * d2Rr_dydy/Rred**2
+            + g.Z * d2P_dydy
+        )
+        return d2E_dydy.ravel()
+
+    def dpsidtheta(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
+        dRr_dj = - g.radius_at(psi)/g.R0 * np.sin(theta)
+        d2Rr_dydj = - g.radius_at(psi, nu=1)/g.R0 * np.sin(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dU_dy = - self._ZAR
+        d2E_dydj = (
+            - 2 * g.A * U * dU_dy * dRr_dj/Rred**3
+            + 3 * g.A * U**2 * dRr_dy * dRr_dj/Rred**4
+            - g.A * U**2 * d2Rr_dydj/Rred**3
+            + 2 * g.mu * dRr_dy/Rred**3
+            - g.mu * d2Rr_dydj/Rred**2
+        )
+        return d2E_dydj.ravel()
+
 class ParticleAdvector:
     def __init__(self, grid, pot):
         self._grid = grid
@@ -102,71 +158,74 @@ class ParticleAdvector:
         self._ltor = ltor
         self._trapped = trapped
 
-    def compute_thetadrift_Bstar(self, psi, theta):
-        g = self._grid
-        A = g.A; Z = g.Z; R0 = g.R0
-
-        vpar = g.vpar[..., [0]]
-        r    = g.radius
-        Rred = 1 + r/R0 * np.cos(theta)
-        P    = self._pot(psi)
-
-        ener = A/2 * vpar**2 + g.mu/(1 + r/R0) + Z*P
-        np.who(locals())
-
-        vEloc = self._pot(psi, nu=1)
-        vDloc = - np.cos(theta)/(R0 * Rred) *\
-                g.qprofile/r *\
-                (2*ener - g.mu/Rred - 2*Z*P)/Z
-
-        return vEloc + vDloc
-
     def compute_bounce_point(self):
         """
-        This method computed the position of the banana tip.
+        This method computes position of the banana tip for trapped particles.
 
-        More specifically, we want to compute `theta_b`
+        More specifically, we want to compute the position `psi, theta`
         of the particle, parametrized by:
         - the average position `psi` ;
         - the parallel velocity `vpar` ;
-        - the magnetic momentum `mu`.
+        - the magnetic momentum `mu` ;
+        and defined as `E = E_0` and `dE_dy = 0`.
         """
         g = self._grid
-        A = g.A; Z = g.Z; R0 = g.R0
+        shape = np.broadcast(g.psi, g.vpar, g.mu).shape[1:]
 
-        theta= g.theta
-        vpar = g.vpar[..., [0]]
-        psi  = g.psi
-        r    = g.radius
-        Rred = 1 + r/R0 * np.cos(theta)
-        P    = self._pot(psi)
+        ener = self._ener.squeeze(axis=0)
+        ltor = self._ltor
+        psi  = np.empty(shape)
+        tht  = np.empty(shape)
 
-        ener  = A/2 * vpar**2 + g.mu/(1 + r/R0) + Z*P
-        drift = self.compute_thetadrift_Bstar(psi, theta)
-        drift = - g.R0 * Rred * drift
+        # Initial guess for banana tip: where vpar==0
+        psi[:] = g.psi.squeeze(axis=0)
+        tht[:] = np.arccos(
+            g.R0 / g.radius_at(g.psi) * (
+                g.mu / (ener - g.Z * self._pot(g.psi)) - 1
+            )
+        ).squeeze(axis=0)
+        np.negative(tht[..., 1], out=tht[..., 1])
 
+        trapped = self._trapped
+        computer = Energy(
+            self._grid, psi.shape,
+            self._pot, ener, ltor,
+        )
 
-        lowener = A/2 * drift**2 + g.mu/Rred + Z*P - ener
-        grdener = np.diff(lowener, axis=0) / np.diff(theta, axis=0)
+        # Compute banana tip by Newton iteration
+        for _ in range(10):
+            val      = computer.value     (psi, tht).reshape(shape)[trapped]
+            dpsi     = computer.dpsi      (psi, tht).reshape(shape)[trapped]
 
-        bounce = lowener > 0
-        bounce = bounce[1:] ^ bounce[:-1]
+            if abs(val).max() < 1e-6 and abs(dpsi).max() < 1e-6:
+                break
 
-        hb_idx = np.argmax(bounce & (theta[ :-1] >= 0), axis=0)
-        lb_idx = np.argmax(bounce & (theta[1:  ] <= 0), axis=0)
+            dtht     = computer.dtheta    (psi, tht).reshape(shape)[trapped]
+            dpsidpsi = computer.dpsidpsi  (psi, tht).reshape(shape)[trapped]
+            dpsidtht = computer.dpsidtheta(psi, tht).reshape(shape)[trapped]
 
-        hb = theta.squeeze()[hb_idx]
-        lb = theta.squeeze()[lb_idx]
-        hb[hb_idx == 0] = np.nan
-        lb[lb_idx == 0] = np.nan
+            # Error and jacobian
+            vec = np.empty((*val.shape, 2))
+            jac = np.empty((*val.shape, 2, 2))
 
-        self._bounce_pos = np.concatenate((hb, lb), axis=-1)
-        self._trapped    = hb_idx != 0
+            vec[..., 0] = val
+            vec[..., 1] = dpsi
 
-        hd = np.take_along_axis(drift, hb_idx[np.newaxis], axis=0)[0]
-        ld = np.take_along_axis(drift, lb_idx[np.newaxis], axis=0)[0]
+            jac[..., 0, 0] = dpsi
+            jac[..., 0, 1] = dtht
+            jac[..., 1, 0] = dpsidpsi
+            jac[..., 1, 1] = dpsidtht
 
-        return np.concatenate((hd, ld), axis=-1)
+            # Update
+            delta = np.linalg.solve(jac, vec)
+            psi[trapped, :] -= delta[..., 0]
+            tht[trapped, :] -= delta[..., 1]
+
+            if abs(delta).max() < 1e-6:
+                break
+
+        self._banana_psi = psi
+        self._banana_theta = tht
 
     def compute_trajectory(self):
         """
