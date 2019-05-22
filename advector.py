@@ -156,7 +156,7 @@ class ParticleAdvector:
 
         self._ener = ener
         self._ltor = ltor
-        self._trapped = trapped
+        self._trapped = trapped[..., 0]
 
     def compute_bounce_point(self):
         """
@@ -186,7 +186,10 @@ class ParticleAdvector:
         ).squeeze(axis=0)
         np.negative(tht[..., 1], out=tht[..., 1])
 
-        trapped = self._trapped
+        # Compare two definitions of trapped particles
+        trapped = np.isfinite(tht).all(axis=-1)
+        assert not np.any(trapped ^ self._trapped)
+
         computer = Energy(
             self._grid, psi.shape,
             self._pot, ener, ltor,
@@ -197,7 +200,7 @@ class ParticleAdvector:
             val      = computer.value     (psi, tht).reshape(shape)[trapped]
             dpsi     = computer.dpsi      (psi, tht).reshape(shape)[trapped]
 
-            if abs(val).max() < 1e-6 and abs(dpsi).max() < 1e-6:
+            if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
                 break
 
             dtht     = computer.dtheta    (psi, tht).reshape(shape)[trapped]
@@ -218,14 +221,16 @@ class ParticleAdvector:
 
             # Update
             delta = np.linalg.solve(jac, vec)
+            assert np.all(np.isfinite(delta))
+
             psi[trapped, :] -= delta[..., 0]
             tht[trapped, :] -= delta[..., 1]
 
-            if abs(delta).max() < 1e-6:
+            if np.all(abs(delta) < 1e-6):
                 break
 
-        self._banana_psi = psi
-        self._banana_theta = tht
+        self._banana_psi   = psi[trapped]
+        self._banana_theta = tht[trapped]
 
     def compute_trajectory(self):
         """
@@ -292,14 +297,8 @@ class ParticleAdvector:
         self._mid_vpar = vpar[thsz:]
         self._mid_Rred = Rred[thsz:]
 
-        vp2 = ener - g.mu/Rred - Z * self._pot(psi)
 
-        # Compute trapped particles
-        trapped = np.any(vp2 < 0, axis=(0, -1), keepdims=True)\
-                & g.mu.astype(bool)
-        self._trapped = trapped.squeeze()
 
-        self._trap_support = vp2 > 0
 
     def compute_freq(self):
         g = self._grid
