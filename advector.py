@@ -87,6 +87,17 @@ class Energy:
         )
         return dE_dj.ravel()
 
+    def dltor(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dU_dl = self._ZAR
+        dE_dl = g.A * U * dU_dl/Rred**2
+        return dE_dl.ravel()
+
     def dpsidpsi(self, psi, theta):
         g = self._grid
         psi = psi.reshape(self._shape)
@@ -128,6 +139,72 @@ class Energy:
             - g.mu * d2Rr_dydj/Rred**2
         )
         return d2E_dydj.ravel()
+
+class Ptheta:
+    def __init__(self, grid, shape, pot, ener, ltor):
+        self._grid = grid
+        self._shape = shape
+        self._pot = pot
+        self._ener = ener
+        self._ltor = ltor
+        self._maxerr = None
+        self._ZAR = grid.Z/grid.A/grid.R0
+
+    def set_maxerr(self, maxerr):
+        self._maxerr = maxerr
+
+    def value(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+        raise NotImplementedError()
+
+        r = g.radius_at(psi)
+        q = g.qprofile_at(psi)
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (ltor - psi)
+        H = A/g.R0 * r**2/(q * Rred)
+
+        P = U * H - Z * q
+        return Ptheta.ravel()
+
+    def dpsi(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        r = g.radius_at(psi)
+        q = g.qprofile_at(psi)
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dU_dy = - self._ZAR
+
+        H = g.A/g.R0 * r**2/(q * Rred)
+        dH_dy = (
+            2 * g.radius_at(psi, nu=1)
+            - r * g.qprofile_at(psi, nu=1)/q
+            - r * dRr_dy/Rred
+        ) * g.A/g.R0 * r/(q * Rred)
+
+        dPtheta_dy = dU_dy * H + U * dH_dy - g.Z * q
+        return dPtheta_dy.ravel()
+
+    def dltor(self, psi, theta):
+        g = self._grid
+        psi = psi.reshape(self._shape)
+
+        r = g.radius_at(psi)
+        q = g.qprofile_at(psi)
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        dU_dl = self._ZAR
+
+        H = g.A/g.R0 * r**2/(q * Rred)
+
+        dPtheta_dl = dU_dl * H
+        return dPtheta_dl.ravel()
 
 class ParticleAdvector:
     def __init__(self, grid, pot):
@@ -305,29 +382,25 @@ class ParticleAdvector:
         psi  = self._mid_psi
         r    = self._mid_r
 
-        computer = Energy(
+        energy = Energy(
             self._grid, shape,
             self._pot, self._ener, self._ltor
         )
-        dE_dy = computer.dpsi(self._mid_psi, theta).reshape(shape)
+        dE_dy = energy.dpsi(self._mid_psi, theta)
+        dE_dl = energy.dltor(self._mid_psi, theta)
 
-        U = Z/A/R0 * (ltor - psi)
-        dU_dy = - Z/A/R0
+        ptheta = Ptheta(
+            self._grid, shape,
+            self._pot, self._ener, self._ltor
+        )
+        dP_dy = ptheta.dpsi(self._mid_psi, theta)
+        dP_dl = ptheta.dltor(self._mid_psi, theta)
 
-        q = g.qprofile_at(psi)
-        Rred = 1 + r/R0 * np.cos(theta)
-        dRr_dy = g.radius_at(psi.real, nu=1)/R0 * np.cos(theta)
+        dt_dtheta = dP_dy / dE_dy
+        dphi_dtheta = (dP_dy * dE_dl / dE_dy - dP_dl) / g.Z
 
-        H = A/g.R0 * r**2/(q * Rred)
-        dH_dy = (
-            2 * g.radius_at(psi, nu=1)
-            - r * g.qprofile_at(psi, nu=1)/q
-            - r * dRr_dy/Rred
-        ) * A/g.R0 * r/(q * Rred)
-
-        dPtheta_dy = dU_dy * H + U * dH_dy - Z * q
-
-        dt_dtheta = dPtheta_dy / dE_dy
+        dt_dtheta   = dt_dtheta  .reshape(shape)
+        dphi_dtheta = dphi_dtheta.reshape(shape)
 
         np.who(locals())
         plt.figure()
@@ -340,7 +413,12 @@ class ParticleAdvector:
         plt.ylim(-1e4, 1e4)
         plt.show(block=False)
 
-        dt_dtheta = self._regularize_trapped(theta, dt_dtheta)
+        self._dt_dtheta, self._time = self._regularize_trapped(
+            theta, dt_dtheta
+        )
+        self._dphi_dtheta, self._phi = self._regularize_trapped(
+            theta, dphi_dtheta
+        )
 
     def _regularize_trapped(self, theta, dt_dtheta):
         """Trapped trajectories need some regularisation near the banana tips.
@@ -387,7 +465,7 @@ class ParticleAdvector:
         ).reshape(theta.size, -1))
         plt.show(block=False)
 
-        return dt_dtheta
+        return dt_dtheta, time
 
     def compute_freq(self):
         g = self._grid
