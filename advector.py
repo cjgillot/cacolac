@@ -402,23 +402,15 @@ class ParticleAdvector:
         dt_dtheta   = dt_dtheta  .reshape(shape)
         dphi_dtheta = dphi_dtheta.reshape(shape)
 
-        np.who(locals())
-        plt.figure()
-        plt.subplot(131)
-        plt.plot(theta.squeeze(), dPtheta_dy[:, 16].reshape(theta.size, -1))
-        plt.subplot(132)
-        plt.plot(theta.squeeze(), dE_dy[:, 16].reshape(theta.size, -1))
-        plt.subplot(133)
-        plt.plot(theta.squeeze(), dt_dtheta[:, 16].reshape(theta.size, -1))
-        plt.ylim(-1e4, 1e4)
-        plt.show(block=False)
-
         self._dt_dtheta, self._time = self._regularize_trapped(
             theta, dt_dtheta
         )
         self._dphi_dtheta, self._phi = self._regularize_trapped(
             theta, dphi_dtheta
         )
+
+        self._bounce_time = self._time[-1] - self._time[0]
+        self._bounce_phi  = self._phi [-1] - self._phi [0]
 
     def _regularize_trapped(self, theta, dt_dtheta):
         """Trapped trajectories need some regularisation near the banana tips.
@@ -428,25 +420,23 @@ class ParticleAdvector:
         trapped = self._trapped
         dtheta  = np.diff(theta).mean()
 
-        plt.figure()
-        plt.subplot(141)
-        plt.plot(theta, dt_dtheta[:, trapped].reshape(theta.size, -1))
-        plt.ylim(-1e4, 1e4)
-
-        uptip = self._banana_theta[..., 0].copy()
-        dwtip = self._banana_theta[..., 1].copy()
+        # Load banana tips
+        uptip = self._banana_theta[..., 0]
+        dwtip = self._banana_theta[..., 1]
 
         # Restrict to trapped support
         dt_dtheta[:, trapped] *= np.less.outer(theta, uptip)[..., np.newaxis]
         dt_dtheta[:, trapped] *= np.greater.outer(theta, dwtip)[..., np.newaxis]
 
+        # Weight the last point for the square-root divergence
+        #   2 = \int_0^1 dx/sqrt(x)
         uptip_idx = theta.searchsorted(uptip, 'left')
         dwtip_idx = theta.searchsorted(dwtip, 'right')
-        uptip -= theta[uptip_idx-1]
-        dwtip -= theta[dwtip_idx  ]
+        uptip = uptip - theta[uptip_idx-1]
+        dwtip = theta[dwtip_idx  ] - dwtip
 
-        dt_dtheta[uptip_idx, trapped].T[:] *= 2 * (uptip / dtheta)
-        dt_dtheta[dwtip_idx, trapped].T[:] *= 2 * (- dwtip / dtheta)
+        dt_dtheta[uptip_idx, trapped].T[:] *= 2/dtheta * uptip
+        dt_dtheta[dwtip_idx, trapped].T[:] *= 2/dtheta * dwtip
 
         # Integrate time series
         theta     = g.theta.squeeze()
@@ -454,16 +444,6 @@ class ParticleAdvector:
         time[1:]  = np.cumsum(dt_dtheta, axis=0)
         time[1:] *= np.diff(theta)[:, np.newaxis, np.newaxis, np.newaxis, np.newaxis]
         time     -= time[theta.searchsorted(0)]
-
-        plt.subplot(142)
-        plt.plot(theta[:-1], dt_dtheta[:, trapped].reshape(theta.size-1, -1))
-        plt.subplot(143)
-        plt.plot(theta, time[:, 16].reshape(theta.size, -1))
-        plt.subplot(144)
-        plt.plot(theta, (
-            (time * g.vpar)[:, trapped]
-        ).reshape(theta.size, -1))
-        plt.show(block=False)
 
         return dt_dtheta, time
 
