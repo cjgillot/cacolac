@@ -371,7 +371,7 @@ class ParticleAdvector:
         self._mid_vpar = vpar[1::2]
         self._mid_Rred = Rred[1::2]
 
-    def compute_time(self):
+    def compute_displacement(self):
         g = self._grid
         A = g.A; Z = g.Z; R0 = g.R0
         theta = g.theta
@@ -447,51 +447,9 @@ class ParticleAdvector:
 
         return dt_dtheta, time
 
-    def compute_freq(self):
-        g = self._grid
-        q = g.qprofile_at(self._r)
-        theta = self._grid.theta.squeeze()
-
-        vtheta  = self._vpar / (q * g.R0 * self._Rred)
-        vtheta += self._pot(self._psi, nu=1) * self._Rred / q
-        # FIXME Add vD.gradtheta
-
-        ifreq = 1/vtheta
-        ifreq[~np.isfinite(ifreq)] = 0
-        spline = interp1d(theta, ifreq)
-        self._ifreq = spline
-        self._int_time = spline.antiderivative()
-
-        vphi  = self._vpar / (g.R0 * self._Rred)
-        # FIXME Add vE.gradphi
-
-        self._vphi = vphi
-        spline = interp1d(theta, vphi * ifreq)
-        self._int_phi = spline.antiderivative()
-
-        # Compute full-bounce quantities
-        bounce_time = self._int_time(theta[-1]) - self._int_time(theta[0])
-        bounce_phi  = self._int_phi (theta[-1]) - self._int_time(theta[0])
-
-        # Get positive frequencies
-        bounce_sign  = np.sign(bounce_time)
-        bounce_phi  *= bounce_sign
-        bounce_time *= bounce_sign
-
-        # Add the mirror part for trapped particles
-        trapped = self._trapped
-        bounce_time[trapped, :] = bounce_time[trapped, :].sum(axis=-1, keepdims=True)
-        bounce_phi [trapped, :] = bounce_phi [trapped, :].sum(axis=-1, keepdims=True)
-
-        self._bounce_time = bounce_time
-        self._bounce_phi  = bounce_phi
-
-        # Compute liveness of particles
-        self._living = interp1d(theta, self._vpar != 0, k=1)
-
     @property
     def ifreq(self):
-        return self._ifreq
+        return self._dt_dtheta
 
     @property
     def psi_path(self):
@@ -503,7 +461,7 @@ class ParticleAdvector:
 
     @property
     def time_path(self):
-        return self._int_time
+        return self._time
 
     @property
     def bounce_time(self):
@@ -511,10 +469,19 @@ class ParticleAdvector:
 
     @property
     def phi_path(self):
-        return self._int_phi
+        return self._phi
 
     def living_path(self, theta):
-        return self._living(theta)
+        uptip   = self._banana_theta[..., 0]
+        dwtip   = self._banana_theta[..., 1]
+        trapped = self._trapped
+        living  = np.empty(theta.shape + trapped.shape)
+        living[:]          = ~trapped
+        living[:, trapped] = (
+            np.less.outer(theta, uptip) &
+            np.greater.outer(theta, dwtip)
+        )
+        return living
 
     @property
     def bounce_phi(self):
