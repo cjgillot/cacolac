@@ -29,7 +29,17 @@ import scipy.optimize
 from scipy.interpolate import make_interp_spline as interp1d
 
 class Energy:
+    """This class encapsulates the computation of the particle energy
+    (hamiltonian) in function of:
+    - mu
+    - ltor
+    - psi
+    - theta
+
+    We also provide derivatives wrt. the variables to solve equations.
+    """
     def __init__(self, grid, pot, ener, ltor):
+        """Constructor."""
         self._grid = grid
         self._pot = pot
         self._ener = ener
@@ -37,6 +47,7 @@ class Energy:
         self._ZAR = grid.Z/grid.A/grid.R0
 
     def value(self, psi, theta):
+        """Compute energy."""
         g = self._grid
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
@@ -47,6 +58,7 @@ class Energy:
         return E
 
     def dpsi(self, psi, theta):
+        """Derivative wrt. psi."""
         g = self._grid
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
@@ -64,6 +76,7 @@ class Energy:
         return dE_dy
 
     def dtheta(self, psi, theta):
+        """Derivative wrt. theta."""
         g = self._grid
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
@@ -77,6 +90,7 @@ class Energy:
         return dE_dj
 
     def dltor(self, psi, theta):
+        """Derivative wrt. ltor."""
         g = self._grid
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
@@ -87,6 +101,7 @@ class Energy:
         return dE_dl
 
     def dpsidpsi(self, psi, theta):
+        """Second derivative in psi."""
         g = self._grid
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
@@ -108,6 +123,7 @@ class Energy:
         return d2E_dydy
 
     def dpsidtheta(self, psi, theta):
+        """Second derivative in psi & theta."""
         g = self._grid
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
@@ -127,28 +143,24 @@ class Energy:
         return d2E_dydj
 
 class Ptheta:
-    def __init__(self, grid, pot, ener, ltor):
+    """This class encapsulates the computation of the particle poloidal
+    angular momentum in function of:
+    - mu
+    - ltor
+    - psi
+    - theta
+
+    We also provide derivatives wrt. the variables to solve equations.
+    """
+    def __init__(self, grid, ener, ltor):
+        """Constructor."""
         self._grid = grid
-        self._pot = pot
         self._ener = ener
         self._ltor = ltor
         self._ZAR = grid.Z/grid.A/grid.R0
 
-    def value(self, psi, theta):
-        g = self._grid
-        raise NotImplementedError()
-
-        r = g.radius_at(psi)
-        q = g.qprofile_at(psi)
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
-
-        U = self._ZAR * (ltor - psi)
-        H = A/g.R0 * r**2/(q * Rred)
-
-        P = U * H - Z * q
-        return Ptheta
-
     def dpsi(self, psi, theta):
+        """Derivative wrt. psi."""
         g = self._grid
 
         r = g.radius_at(psi)
@@ -170,13 +182,13 @@ class Ptheta:
         return dPtheta_dy
 
     def dltor(self, psi, theta):
+        """Derivative wrt. ltor."""
         g = self._grid
 
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
 
-        U = self._ZAR * (self._ltor - psi)
         dU_dl = self._ZAR
 
         H = g.A/g.R0 * r**2/(q * Rred)
@@ -185,11 +197,19 @@ class Ptheta:
         return dPtheta_dl
 
 class ParticleAdvector:
+    """Compute trajectory of the particles parametrized by the poloidal angle.
+    """
     def __init__(self, grid, pot):
+        """Constructor."""
         self._grid = grid
         self._pot = interp1d(grid.psi.squeeze(), pot)
 
     def compute_invariants(self):
+        """Initialize energy, toroidal momentum and trappedness.
+
+        The toroidal momentum is defined to be independent of the velocity sign
+        for trapped particles. This allows to model full-bounce in one go.
+        """
         g = self._grid
         A = g.A; Z = g.Z; R0 = g.R0
         shape = np.broadcast(g.psi, g.vpar, g.mu).shape
@@ -200,7 +220,7 @@ class ParticleAdvector:
 
         Rred  = 1 + g.radius/R0 * np.cos(g.theta)
         vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
-        vpar0 = g.sign * np.sqrt(2/A) * np.sqrt(vp2.clip(0, None))
+        vpar0 = g.sign * np.sqrt(2/A * vp2.clip(0, None))
 
         trapped = vp2.min(axis=0) < 0
         assert np.all(trapped[..., 0] == trapped[..., 1])
@@ -296,29 +316,32 @@ class ParticleAdvector:
         - the average position `psi` ;
         - the parallel velocity `vpar` ;
         - the magnetic momentum `mu`.
+
+        It is defined as the level lines of the energy as a function of mu,
+        ltor and theta. Those are found by Newton iteration.
         """
         g = self._grid
-        A = g.A; Z = g.Z; R0 = g.R0
-        theta = np.empty((2*g.theta.size-1,) + g.theta.shape[1:])
+
+        # Use a twice refined grid for path computation.
+        # Regular points are used for trajectory,
+        # staggered points are used for velocities.
+        theta       = np.empty((2*g.theta.size-1,) + g.theta.shape[1:])
         theta[0::2] = g.theta
         theta[1::2] = .5 * (g.theta[1:] + g.theta[:-1])
-        shape = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
 
-        ener = self._ener
-        ltor = self._ltor
+        # Initial guess for trajectory
+        Rred  = 1 + g.radius/g.R0 * np.cos(theta)
+        vp2   = self._ener - g.mu/Rred - g.Z * self._pot(g.psi)
+        vpar0 = g.sign * np.sqrt(2/g.A * vp2.clip(0, None))
+        psi0  = self._ltor - g.A/g.Z * g.R0 * Rred * vpar0
+        del Rred, vp2, vpar0
 
-        Rred  = 1 + g.radius/R0 * np.cos(theta)
-        vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
-        vpar0 = g.sign * np.sqrt(2/A) * np.sqrt(vp2.clip(0, None))
-        psi0  = ltor - A/Z * R0 * Rred * vpar0
-        del Rred, vp2
-
+        # Search array shape, and mask of searched points.
+        shape  = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
         living = self.living_path(theta.squeeze())[..., np.newaxis]
 
-        computer = Energy(
-            self._grid,
-            self._pot, self._ener, self._ltor
-        )
+        # Compute energy and psi-derivative
+        computer = Energy(self._grid, self._pot, self._ener, self._ltor)
         def fval(psi):
             psi = psi.reshape(shape)
             ret = computer.value(psi, theta)
@@ -329,54 +352,54 @@ class ParticleAdvector:
             ret = computer.dpsi(psi, theta)
             return ret.ravel()
 
-        maxerr = abs(computer.value(psi0, theta)).max()
-
-        psi = scipy.optimize.zeros.newton(
+        # Find level line
+        psi  = scipy.optimize.zeros.newton(
             func=fval, fprime=fprime,
             x0=psi0.copy().ravel(),
             maxiter=10,
         )
-        psi = psi.reshape(shape)
-        solerr  = np.logical_not(abs(computer.value(psi, theta)) < 1e-5 * maxerr)
-        solerr |= psi < 0
-        psi[solerr] = psi0[solerr]
-        r    = g.radius_at(psi)
-        Rred = 1 + r/R0 * np.cos(theta)
-        vpar = (ltor - psi) * Z/A/R0 / Rred
-
+        psi  = psi.reshape(shape)
         assert np.all(np.isfinite(psi))
+
+        # Compute trajectory
+        r    = g.radius_at(psi)
+        Rred = 1 + r/g.R0 * np.cos(theta)
+        vpar = (self._ltor - psi) * g.Z/g.A/g.R0 / Rred
         assert np.all(np.isfinite(vpar))
-        self._psi  = psi [0::2]
-        self._vpar = vpar[0::2]
-        self._mid_psi  = psi [1::2]
+
+        # Save path
+        self._psi     = psi [0::2]
+        self._vpar    = vpar[0::2]
+        self._mid_psi = psi [1::2]
 
     def compute_displacement(self):
+        """Compute time and toroidal displacement in function of theta.
+
+        The velocities are computed from the Lagrangian
+            L(ltor, psi, theta, dt, dphi) =
+                Ptheta(ltor, psi, theta)
+                + Z * ltor * dphi
+                - energy(ltor, psi, theta) * dt
+        """
         g = self._grid
-        A = g.A; Z = g.Z; R0 = g.R0
         theta = g.theta
         theta = .5 * (theta[1:] + theta[:-1])
-        shape = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
 
-        ltor = self._ltor
-        psi  = self._mid_psi
-
-        energy = Energy(
-            self._grid,
-            self._pot, self._ener, self._ltor
-        )
+        # Energy computation
+        energy = Energy(self._grid, self._pot, self._ener, self._ltor)
         dE_dy = energy.dpsi(self._mid_psi, theta)
         dE_dl = energy.dltor(self._mid_psi, theta)
 
-        ptheta = Ptheta(
-            self._grid,
-            self._pot, self._ener, self._ltor
-        )
+        # Poloidal momentum computation
+        ptheta = Ptheta(self._grid, self._ener, self._ltor)
         dP_dy = ptheta.dpsi(self._mid_psi, theta)
         dP_dl = ptheta.dltor(self._mid_psi, theta)
 
+        # Velocities
         dt_dtheta = dP_dy / dE_dy
         dphi_dtheta = (dP_dy * dE_dl / dE_dy - dP_dl) / g.Z
 
+        # Remove singularities at banana tips
         self._dt_dtheta, self._time = self._regularize_trapped(
             theta, dt_dtheta
         )
@@ -384,8 +407,21 @@ class ParticleAdvector:
             theta, dphi_dtheta
         )
 
+    def compute_precession(self):
+        """Compute full-bounce quantities from displacements."""
+        # Compute full-poloidal quantity
         self._bounce_time = self._time[-1] - self._time[0]
         self._bounce_phi  = self._phi [-1] - self._phi [0]
+
+        # Do not forget return path for bananas
+        trapped = self._trapped
+        self._bounce_time[trapped] *= 2
+        self._bounce_phi [trapped] *= 2
+
+        # Change sign for positive times
+        sign = np.sign(self._bounce_time)
+        self._bounce_time *= sign
+        self._bounce_phi  *= sign
 
     def _regularize_trapped(self, theta, dt_dtheta):
         """Trapped trajectories need some regularisation near the banana tips.
@@ -490,6 +526,9 @@ def main():
     adv.compute_invariants()
     np.who(adv.__dict__)
 
+    adv.compute_bounce_point()
+    np.who(adv.__dict__)
+
     adv.compute_trajectory()
     np.who(adv.__dict__)
 
@@ -500,11 +539,9 @@ def main():
     plt.plot(theta, adv.vpar_path[:, 16].reshape(theta.size, -1))
     plt.show()
 
-    adv.compute_bounce_point()
-    np.who(adv.__dict__)
-
     # Compute trajectory timing
     adv.compute_displacement()
+    adv.compute_precession()
     np.who(adv.__dict__)
 
     living = 1/adv.living_path(theta)[..., np.newaxis]
