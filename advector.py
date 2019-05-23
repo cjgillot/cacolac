@@ -513,6 +513,8 @@ def main():
     pot = np.zeros_like(rg)
     adv = ParticleAdvector(grid, pot)
     adv.compute_invariants()
+    np.who(adv.__dict__)
+
     adv.compute_trajectory()
     np.who(adv.__dict__)
 
@@ -523,12 +525,17 @@ def main():
     plt.plot(theta, adv.vpar_path[:, 16].reshape(theta.size, -1))
     plt.show()
 
-    # Compute trajectory timing
-    adv.compute_freq()
+    adv.compute_bounce_point()
     np.who(adv.__dict__)
 
-    time = adv.time_path(grid.theta.squeeze())
-    phi  = adv.phi_path(grid.theta.squeeze())
+    # Compute trajectory timing
+    adv.compute_displacement()
+    np.who(adv.__dict__)
+
+    living = 1/adv.living_path(theta)[..., np.newaxis]
+    time = adv.time_path * living
+    phi  = adv.phi_path  * living
+
     plt.figure()
     plt.subplot(121)
     plt.plot(
