@@ -345,16 +345,10 @@ class ParticleAdvector:
         vpar = (ltor - psi) * Z/A/R0 / Rred
 
         assert np.all(np.isfinite(psi))
-        assert np.all(np.isfinite(r))
         assert np.all(np.isfinite(vpar))
         self._psi  = psi [0::2]
-        self._r    = r   [0::2]
         self._vpar = vpar[0::2]
-        self._Rred = Rred[0::2]
         self._mid_psi  = psi [1::2]
-        self._mid_r    = r   [1::2]
-        self._mid_vpar = vpar[1::2]
-        self._mid_Rred = Rred[1::2]
 
     def compute_displacement(self):
         g = self._grid
