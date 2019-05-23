@@ -29,9 +29,8 @@ import scipy.optimize
 from scipy.interpolate import make_interp_spline as interp1d
 
 class Energy:
-    def __init__(self, grid, shape, pot, ener, ltor):
+    def __init__(self, grid, pot, ener, ltor):
         self._grid = grid
-        self._shape = shape
         self._pot = pot
         self._ener = ener
         self._ltor = ltor
@@ -43,13 +42,12 @@ class Energy:
 
     def value(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
         U = self._ZAR * (self._ltor - psi)
         P = self._pot(psi)
         E = g.A/2 * U**2 / Rred**2 + g.mu / Rred + g.Z * P - self._ener
-        E = E.ravel()
+
         if self._maxerr is not None:
             maxerr = self._maxerr
             E = E.clip(-maxerr, maxerr)
@@ -57,7 +55,6 @@ class Energy:
 
     def dpsi(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
         dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
@@ -71,11 +68,10 @@ class Energy:
             - g.mu * dRr_dy/Rred**2
             + g.Z * dP_dy
         )
-        return dE_dy.ravel()
+        return dE_dy
 
     def dtheta(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
         dRr_dj = - g.radius_at(psi)/g.R0 * np.sin(theta)
@@ -85,22 +81,20 @@ class Energy:
             - g.A * U**2 * dRr_dj/Rred**3
             - g.mu * dRr_dj/Rred**2
         )
-        return dE_dj.ravel()
+        return dE_dj
 
     def dltor(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
 
         U = self._ZAR * (self._ltor - psi)
         dU_dl = self._ZAR
         dE_dl = g.A * U * dU_dl/Rred**2
-        return dE_dl.ravel()
+        return dE_dl
 
     def dpsidpsi(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
         dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
@@ -118,11 +112,10 @@ class Energy:
             - g.mu * d2Rr_dydy/Rred**2
             + g.Z * d2P_dydy
         )
-        return d2E_dydy.ravel()
+        return d2E_dydy
 
     def dpsidtheta(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
         dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
@@ -138,12 +131,11 @@ class Energy:
             + 2 * g.mu * dRr_dy/Rred**3
             - g.mu * d2Rr_dydj/Rred**2
         )
-        return d2E_dydj.ravel()
+        return d2E_dydj
 
 class Ptheta:
-    def __init__(self, grid, shape, pot, ener, ltor):
+    def __init__(self, grid, pot, ener, ltor):
         self._grid = grid
-        self._shape = shape
         self._pot = pot
         self._ener = ener
         self._ltor = ltor
@@ -155,7 +147,6 @@ class Ptheta:
 
     def value(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
         raise NotImplementedError()
 
         r = g.radius_at(psi)
@@ -166,11 +157,10 @@ class Ptheta:
         H = A/g.R0 * r**2/(q * Rred)
 
         P = U * H - Z * q
-        return Ptheta.ravel()
+        return Ptheta
 
     def dpsi(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
@@ -188,11 +178,10 @@ class Ptheta:
         ) * g.A/g.R0 * r/(q * Rred)
 
         dPtheta_dy = dU_dy * H + U * dH_dy - g.Z * q
-        return dPtheta_dy.ravel()
+        return dPtheta_dy
 
     def dltor(self, psi, theta):
         g = self._grid
-        psi = psi.reshape(self._shape)
 
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
@@ -204,7 +193,7 @@ class Ptheta:
         H = g.A/g.R0 * r**2/(q * Rred)
 
         dPtheta_dl = dU_dl * H
-        return dPtheta_dl.ravel()
+        return dPtheta_dl
 
 class ParticleAdvector:
     def __init__(self, grid, pot):
@@ -268,21 +257,21 @@ class ParticleAdvector:
         assert not np.any(trapped ^ self._trapped)
 
         computer = Energy(
-            self._grid, psi.shape,
+            self._grid,
             self._pot, ener, ltor,
         )
 
         # Compute banana tip by Newton iteration
         for _ in range(10):
-            val      = computer.value     (psi, tht).reshape(shape)[trapped]
-            dpsi     = computer.dpsi      (psi, tht).reshape(shape)[trapped]
+            val      = computer.value     (psi, tht)[0, trapped]
+            dpsi     = computer.dpsi      (psi, tht)[0, trapped]
 
             if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
                 break
 
-            dtht     = computer.dtheta    (psi, tht).reshape(shape)[trapped]
-            dpsidpsi = computer.dpsidpsi  (psi, tht).reshape(shape)[trapped]
-            dpsidtht = computer.dpsidtheta(psi, tht).reshape(shape)[trapped]
+            dtht     = computer.dtheta    (psi, tht)[0, trapped]
+            dpsidpsi = computer.dpsidpsi  (psi, tht)[0, trapped]
+            dpsidtht = computer.dpsidtheta(psi, tht)[0, trapped]
 
             # Error and jacobian
             vec = np.empty((*val.shape, 2))
@@ -336,9 +325,17 @@ class ParticleAdvector:
         del Rred, vp2
 
         computer = Energy(
-            self._grid, shape,
+            self._grid,
             self._pot, self._ener, self._ltor
         )
+        def fval(psi):
+            psi = psi.reshape(shape)
+            ret = computer.value(psi, theta)
+            return ret.ravel()
+        def fprime(psi):
+            psi = psi.reshape(shape)
+            ret = computer.dpsi(psi, theta)
+            return ret.ravel()
 
         maxerr = np.inf
         maxerr = abs(computer.value(psi0, theta)).max()
@@ -346,16 +343,15 @@ class ParticleAdvector:
         computer.set_maxerr(maxerr)
 
         psi = scipy.optimize.zeros.newton(
-            func=computer.value, fprime=computer.dpsi,
+            func=fval, fprime=fprime,
             x0=psi0.copy().ravel(),
-            args=(theta,),
             maxiter=10,
         )
+        psi = psi.reshape(shape)
         solerr  = np.logical_not(abs(computer.value(psi, theta)) < 1e-5 * maxerr)
         solerr |= psi < 0
-        psi[solerr] = psi0.ravel()[solerr]
-        psi = psi.reshape(shape)
-        r = g.radius_at(psi)
+        psi[solerr] = psi0[solerr]
+        r    = g.radius_at(psi)
         Rred = 1 + r/R0 * np.cos(theta)
         vpar = (ltor - psi) * Z/A/R0 / Rred
 
@@ -380,17 +376,16 @@ class ParticleAdvector:
 
         ltor = self._ltor
         psi  = self._mid_psi
-        r    = self._mid_r
 
         energy = Energy(
-            self._grid, shape,
+            self._grid,
             self._pot, self._ener, self._ltor
         )
         dE_dy = energy.dpsi(self._mid_psi, theta)
         dE_dl = energy.dltor(self._mid_psi, theta)
 
         ptheta = Ptheta(
-            self._grid, shape,
+            self._grid,
             self._pot, self._ener, self._ltor
         )
         dP_dy = ptheta.dpsi(self._mid_psi, theta)
@@ -398,9 +393,6 @@ class ParticleAdvector:
 
         dt_dtheta = dP_dy / dE_dy
         dphi_dtheta = (dP_dy * dE_dl / dE_dy - dP_dl) / g.Z
-
-        dt_dtheta   = dt_dtheta  .reshape(shape)
-        dphi_dtheta = dphi_dtheta.reshape(shape)
 
         self._dt_dtheta, self._time = self._regularize_trapped(
             theta, dt_dtheta
