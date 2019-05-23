@@ -34,11 +34,7 @@ class Energy:
         self._pot = pot
         self._ener = ener
         self._ltor = ltor
-        self._maxerr = None
         self._ZAR = grid.Z/grid.A/grid.R0
-
-    def set_maxerr(self, maxerr):
-        self._maxerr = maxerr
 
     def value(self, psi, theta):
         g = self._grid
@@ -48,9 +44,6 @@ class Energy:
         P = self._pot(psi)
         E = g.A/2 * U**2 / Rred**2 + g.mu / Rred + g.Z * P - self._ener
 
-        if self._maxerr is not None:
-            maxerr = self._maxerr
-            E = E.clip(-maxerr, maxerr)
         return E
 
     def dpsi(self, psi, theta):
@@ -139,11 +132,7 @@ class Ptheta:
         self._pot = pot
         self._ener = ener
         self._ltor = ltor
-        self._maxerr = None
         self._ZAR = grid.Z/grid.A/grid.R0
-
-    def set_maxerr(self, maxerr):
-        self._maxerr = maxerr
 
     def value(self, psi, theta):
         g = self._grid
@@ -324,6 +313,8 @@ class ParticleAdvector:
         psi0  = ltor - A/Z * R0 * Rred * vpar0
         del Rred, vp2
 
+        living = self.living_path(theta.squeeze())[..., np.newaxis]
+
         computer = Energy(
             self._grid,
             self._pot, self._ener, self._ltor
@@ -331,16 +322,14 @@ class ParticleAdvector:
         def fval(psi):
             psi = psi.reshape(shape)
             ret = computer.value(psi, theta)
+            ret*= living
             return ret.ravel()
         def fprime(psi):
             psi = psi.reshape(shape)
             ret = computer.dpsi(psi, theta)
             return ret.ravel()
 
-        maxerr = np.inf
         maxerr = abs(computer.value(psi0, theta)).max()
-
-        computer.set_maxerr(maxerr)
 
         psi = scipy.optimize.zeros.newton(
             func=fval, fprime=fprime,
