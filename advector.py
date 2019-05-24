@@ -460,9 +460,8 @@ class ParticleAdvector:
         dwtip_idx = theta.searchsorted(dwtip, 'right')
         uptip = uptip - theta[uptip_idx-1]
         dwtip = theta[dwtip_idx  ] - dwtip
-
-        dt_dtheta[uptip_idx, trapped].T[:] *= 2/dtheta * uptip
-        dt_dtheta[dwtip_idx, trapped].T[:] *= 2/dtheta * dwtip
+        dt_dtheta[uptip_idx-1, trapped].T[:] *= 2/dtheta * uptip
+        dt_dtheta[dwtip_idx  , trapped].T[:] *= 2/dtheta * dwtip
 
         # Integrate time series
         theta     = g.theta.squeeze()
@@ -474,28 +473,8 @@ class ParticleAdvector:
         return dt_dtheta, time
 
     @property
-    def ifreq(self):
+    def ifreq_path(self):
         return self._dt_dtheta
-
-    @property
-    def psi_path(self):
-        return self._psi
-
-    @property
-    def vpar_path(self):
-        return self._vpar
-
-    @property
-    def time_path(self):
-        return self._time
-
-    @property
-    def bounce_time(self):
-        return self._bounce_time
-
-    @property
-    def phi_path(self):
-        return self._phi
 
     def living_path(self, theta):
         uptip   = self._banana_theta[..., 0]
@@ -510,8 +489,36 @@ class ParticleAdvector:
         return living
 
     @property
+    def psi_path(self):
+        return self._psi
+
+    @property
+    def vpar_path(self):
+        return self._vpar
+
+    @property
+    def time_path(self):
+        return self._time
+
+    @property
+    def phi_path(self):
+        return self._phi
+
+    @property
+    def bounce_time(self):
+        return self._bounce_time
+
+    @property
     def bounce_phi(self):
         return self._bounce_phi
+
+    @property
+    def energy(self):
+        return self._ener
+
+    @property
+    def ltor(self):
+        return self._ltor
 
     @property
     def trapped(self):
