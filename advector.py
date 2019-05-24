@@ -28,6 +28,18 @@ import numpy as np
 import scipy.optimize
 from scipy.interpolate import make_interp_spline as interp1d
 
+def double_mesh(array, *, axis):
+    assert axis == 0
+    shap = list(array.shape)
+    shap[axis] *= 2
+    shap[axis] -= 1
+    ret  = np.empty(shap, dtype=array.dtype)
+    ret[0::2]  = array
+    ret[1::2]  = array[1:  ]
+    ret[1::2] += array[ :-1]
+    ret[1::2] /= 2
+    return ret
+
 class Energy:
     """This class encapsulates the computation of the particle energy
     (hamiltonian) in function of:
@@ -333,14 +345,8 @@ class ParticleAdvector:
         # Use a twice refined grid for path computation.
         # Regular points are used for trajectory,
         # staggered points are used for velocities.
-        theta       = np.empty((2*g.theta.size-1,) + g.theta.shape[1:])
-        theta[0::2] = g.theta
-        theta[1::2] = .5 * (g.theta[1:] + g.theta[:-1])
-
-        # Initial guess for trajectory
-        psi0        = np.empty((theta.size,) + self._psi.shape[1:])
-        psi0[0::2]  = self._psi
-        psi0[1::2]  = .5 * (self._psi[1:] + self._psi[:-1])
+        theta = double_mesh(g.theta, axis=0)
+        psi0  = double_mesh(self._psi, axis=0)
 
         # Search array shape, and mask of searched points.
         shape  = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
