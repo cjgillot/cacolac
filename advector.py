@@ -243,6 +243,8 @@ class ParticleAdvector:
         # We do not use a fancy trick here to have ltor closer to psi.
         # Doing so would mess up the computation of the velocity,
         # which is required everywhere in Energy and Ptheta.
+        # FIXME Find a way for `g.psi` to be a grid in `psibar = <psi(theta)>`
+        # instead of a grid in `ltor`.
         ltor = g.psi
         assert np.allclose(vpar0, Z/A/R0 * (ltor - psi0) / Rred)
 

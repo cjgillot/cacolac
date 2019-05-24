@@ -38,9 +38,7 @@ class Grid:
         self._r = rg
         self._y = psi
         self._theta = theta
-        self._ltor = - Zs * psi + As * R0 * Rred * vpar
         self._vpar = vpar
-        self._ener = As/2 * vpar**2 + mu / Rred
         if vpar.ndim == 2:
             self._spar = np.asarray([1, -1])[(None,) * (vpar.ndim - 1)]
         else:
@@ -80,16 +78,8 @@ class Grid:
         return self._theta
 
     @property
-    def ltor(self):
-        return self._ltor
-
-    @property
     def vpar(self):
         return self._vpar
-
-    @property
-    def energy(self):
-        return self._ener
 
     @property
     def mu(self):
@@ -99,11 +89,11 @@ class Grid:
     def sign(self):
         return self._spar
 
-    def radius_at(self, y):
-        return self._r_at(y)
+    def radius_at(self, y, nu=0):
+        return self._r_at(y, nu=nu)
 
-    def qprofile_at(self, y):
-        return self._q_at(y)
+    def qprofile_at(self, y, nu=0):
+        return self._q_at(y, nu=nu)
 
 def main():
     A = Z = 1
