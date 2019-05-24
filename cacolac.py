@@ -83,6 +83,12 @@ from .grid import Grid
 from .advector import ParticleAdvector
 from .fem import DenseP1Basis
 
+def staggered(array, *, axis):
+    assert axis == 0
+    ret = array[1:] + array[:-1]
+    ret/= 2
+    return ret
+
 def ravel_4(array):
     shape = array.shape[:-4] + (-1,)
     return np.reshape(array, shape)
@@ -102,9 +108,14 @@ class KernelElementComputer:
             computer._omega, computer._ntor,
             indexing='ij', sparse=True,
         )
-        self._psi_path  = interp1d(grid.theta.squeeze(), adv.psi_path)
-        self._phi_path  = adv.phi_path
-        self._time_path = adv.time_path
+
+        theta = grid.theta.squeeze()
+        self._psi_path   = interp1d(theta, adv.psi_path)
+        self._phi_path   = interp1d(theta, adv.phi_path)
+        self._time_path  = interp1d(theta, adv.time_path)
+
+        theta = staggered(theta, axis=0)
+        self._ifreq_path = interp1d(theta, adv.ifreq_path)
 
     def precompute(self):
         """This method computes the position-independent quantities."""
@@ -145,7 +156,8 @@ class KernelElementComputer:
 
         # Interpolate past position
         interp = fe_basis.interpolate(
-            psi, theta, mask=self._living,
+            psi, theta,
+            mask=self._living[..., np.newaxis],
             with_deriv=True,
         )
 
@@ -205,7 +217,7 @@ class KernelElementComputer:
                 self._warp_half(self._phi, self._tim, +1)
 
         # Jacobian for theta integral
-        warp_n *= ravel_4(a.ifreq(self._tht))
+        warp_n *= ravel_4(self._ifreq_path(self._tht))
 
         # Position-independent quantities
         self._past_warp = warp
@@ -287,7 +299,7 @@ class KernelElementComputer:
         present_warp = self._warp_half(phi1, tim1, -1, mask)
 
         # Compute warping
-        causal_warp = self._causality(tim1, mask)
+        causal_warp = self._causality(tim1, a.trapped)
 
         # Assemble
         self._add_contribution(
@@ -441,15 +453,13 @@ class KernelComputer:
         self._theta = np.atleast_1d(theta)
         self._ntor  = np.atleast_1d(ntor)
 
-        sl = (Ellipsis,) + (grid.energy.ndim - 2) * (None,)
+        sl = (Ellipsis,) + (grid.mu.ndim - 2) * (None,)
         self._Neq = Neq[sl]
         self._Teq = Teq[sl]
         if Veq is not None:
             self._Veq = Veq[sl]
         else:
             self._Veq = None
-
-        self.compute_distribution()
 
         # Warning: Large matrix
         self._output = np.zeros((
@@ -458,7 +468,7 @@ class KernelComputer:
             psi.size, theta.size,
         ), dtype=np.complex128)
 
-    def compute_distribution(self):
+    def compute_distribution(self, adv):
         g = self._grid
         Neq = self._Neq
         Teq = self._Teq
@@ -466,7 +476,7 @@ class KernelComputer:
 
         # Distribution function
         lnFeq = np.zeros(np.broadcast(g.psi, g.vpar, g.mu).shape[1:])
-        lnFeq -= - g.energy.mean(axis=0).squeeze()/Teq
+        lnFeq -= - adv.energy.mean(axis=0).squeeze()/Teq
         if Veq is not None:
             lnFeq += g.ltor.mean(axis=0) * Veq/Teq
         lnFeq += np.log(Neq)
@@ -526,11 +536,11 @@ def main():
     # Advect particles
     pot = np.zeros_like(rg)
     adv = ParticleAdvector(grid, pot)
+    adv.compute_invariants()
+    adv.compute_bounce_point()
     adv.compute_trajectory()
-    np.who(adv.__dict__)
-
-    # Compute trajectory timing
-    adv.compute_freq()
+    adv.compute_displacement()
+    adv.compute_precession()
     np.who(adv.__dict__)
 
     # Compute kernel
@@ -544,6 +554,7 @@ def main():
         omega=np.asarray([1e-3 + 1e-4j]),
         ntor=np.arange(10),
     )
+    kern.compute_distribution(adv)
     kern.compute(adv)
 
     out = kern._output
