@@ -225,13 +225,21 @@ class ParticleAdvector:
         trapped = vp2.min(axis=0) < 0
         assert np.all(trapped[..., 0] == trapped[..., 1])
 
+        dRv0  = Rred * vpar0
+        psi0  = g.psi - A/Z * R0 * dRv0
+
+        # We do not use a fancy trick here to have ltor closer to psi.
+        # Doing so would mess up the computation of the velocity,
+        # which is required everywhere in Energy and Ptheta.
         ltor = np.empty(shape[1:])
         ltor[:] = g.psi.squeeze(axis=0)
-        ltor[~trapped] += A/Z * R0 * np.mean(Rred * vpar0, axis=0)[~trapped]
+        assert np.allclose(vpar0, Z/A/R0 * (ltor - psi0) / Rred)
 
         self._ener = ener
         self._ltor = ltor
         self._trapped = trapped[..., 0]
+
+        self._psi = psi0
 
     def compute_bounce_point(self):
         """
@@ -330,11 +338,9 @@ class ParticleAdvector:
         theta[1::2] = .5 * (g.theta[1:] + g.theta[:-1])
 
         # Initial guess for trajectory
-        Rred  = 1 + g.radius/g.R0 * np.cos(theta)
-        vp2   = self._ener - g.mu/Rred - g.Z * self._pot(g.psi)
-        vpar0 = g.sign * np.sqrt(2/g.A * vp2.clip(0, None))
-        psi0  = self._ltor - g.A/g.Z * g.R0 * Rred * vpar0
-        del Rred, vp2, vpar0
+        psi0        = np.empty((theta.size,) + self._psi.shape[1:])
+        psi0[0::2]  = self._psi
+        psi0[1::2]  = .5 * (self._psi[1:] + self._psi[:-1])
 
         # Search array shape, and mask of searched points.
         shape  = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
@@ -351,12 +357,16 @@ class ParticleAdvector:
             psi = psi.reshape(shape)
             ret = computer.dpsi(psi, theta)
             return ret.ravel()
+        def fsecond(psi):
+            psi = psi.reshape(shape)
+            ret = computer.dpsidpsi(psi, theta)
+            return ret.ravel()
 
         # Find level line
         psi  = scipy.optimize.zeros.newton(
-            func=fval, fprime=fprime,
+            func=fval, fprime=fprime, fprime2=fsecond,
             x0=psi0.copy().ravel(),
-            maxiter=10,
+            maxiter=10, tol=1e-6,
         )
         psi  = psi.reshape(shape)
         assert np.all(np.isfinite(psi))
