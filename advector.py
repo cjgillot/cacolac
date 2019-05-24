@@ -243,12 +243,11 @@ class ParticleAdvector:
         # We do not use a fancy trick here to have ltor closer to psi.
         # Doing so would mess up the computation of the velocity,
         # which is required everywhere in Energy and Ptheta.
-        ltor = np.empty(shape[1:])
-        ltor[:] = g.psi.squeeze(axis=0)
+        ltor = g.psi
         assert np.allclose(vpar0, Z/A/R0 * (ltor - psi0) / Rred)
 
-        self._ener = ener
-        self._ltor = ltor
+        self._ener = ener.squeeze(axis=0)
+        self._ltor = ltor.squeeze(axis=0)
         self._trapped = trapped[..., 0]
 
         self._psi = psi0
@@ -267,8 +266,6 @@ class ParticleAdvector:
         g = self._grid
         shape = np.broadcast(g.psi, g.vpar, g.mu).shape[1:]
 
-        ener = self._ener.squeeze(axis=0)
-        ltor = self._ltor
         psi  = np.empty(shape)
         tht  = np.empty(shape)
 
@@ -276,7 +273,7 @@ class ParticleAdvector:
         psi[:] = g.psi.squeeze(axis=0)
         tht[:] = np.arccos(
             g.R0 / g.radius_at(g.psi) * (
-                g.mu / (ener - g.Z * self._pot(g.psi)) - 1
+                g.mu / (self._ener - g.Z * self._pot(g.psi)) - 1
             )
         ).squeeze(axis=0)
         np.negative(tht[..., 1], out=tht[..., 1])
@@ -287,20 +284,20 @@ class ParticleAdvector:
 
         computer = Energy(
             self._grid,
-            self._pot, ener, ltor,
+            self._pot, self._ener, self._ltor,
         )
 
         # Compute banana tip by Newton iteration
         for _ in range(10):
-            val      = computer.value     (psi, tht)[0, trapped]
-            dpsi     = computer.dpsi      (psi, tht)[0, trapped]
+            val      = computer.value     (psi, tht)[:, trapped]
+            dpsi     = computer.dpsi      (psi, tht)[:, trapped]
 
             if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
                 break
 
-            dtht     = computer.dtheta    (psi, tht)[0, trapped]
-            dpsidpsi = computer.dpsidpsi  (psi, tht)[0, trapped]
-            dpsidtht = computer.dpsidtheta(psi, tht)[0, trapped]
+            dtht     = computer.dtheta    (psi, tht)[:, trapped]
+            dpsidpsi = computer.dpsidpsi  (psi, tht)[:, trapped]
+            dpsidtht = computer.dpsidtheta(psi, tht)[:, trapped]
 
             # Error and jacobian
             vec = np.empty((*val.shape, 2))
@@ -318,8 +315,8 @@ class ParticleAdvector:
             delta = np.linalg.solve(jac, vec)
             assert np.all(np.isfinite(delta))
 
-            psi[trapped, :] -= delta[..., 0]
-            tht[trapped, :] -= delta[..., 1]
+            psi[trapped, :] -= delta[..., 0].squeeze(axis=0)
+            tht[trapped, :] -= delta[..., 1].squeeze(axis=0)
 
             if np.all(abs(delta) < 1e-6):
                 break
