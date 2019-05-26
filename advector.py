@@ -410,17 +410,16 @@ class ParticleAdvector:
         dP_dy = ptheta.dpsi(self._mid_psi, theta)
         dP_dl = ptheta.dltor(self._mid_psi, theta)
 
-        # Velocities
+        # Time displacement
         dt_dtheta = dP_dy / dE_dy
-        dphi_dtheta = (dP_dy * dE_dl / dE_dy - dP_dl) / g.Z
+        dt_dtheta = self._regularize_trapped(theta, dt_dtheta)
+        self._dt_dtheta = dt_dtheta
+        self._time = self._integrate_theta(dt_dtheta)
 
-        # Remove singularities at banana tips
-        self._dt_dtheta, self._time = self._regularize_trapped(
-            theta, dt_dtheta
-        )
-        self._dphi_dtheta, self._phi = self._regularize_trapped(
-            theta, dphi_dtheta
-        )
+        # Toroidal displacement
+        dphi_dtheta = (dE_dl * dt_dtheta - dP_dl) / g.Z
+        self._dphi_dtheta = dphi_dtheta
+        self._phi = self._integrate_theta(dphi_dtheta)
 
     def compute_precession(self):
         """Compute full-bounce quantities from displacements."""
@@ -445,6 +444,7 @@ class ParticleAdvector:
         theta   = theta.squeeze()
         trapped = self._trapped
         dtheta  = np.diff(theta).mean()
+        assert np.allclose(np.diff(theta), dtheta)
 
         # Load banana tips
         uptip = self._banana_theta[..., 0]
@@ -463,14 +463,21 @@ class ParticleAdvector:
         dt_dtheta[uptip_idx-1, trapped].T[:] *= 2/dtheta * uptip
         dt_dtheta[dwtip_idx  , trapped].T[:] *= 2/dtheta * dwtip
 
+        return dt_dtheta
+
+    def _integrate_theta(self, dt_dtheta):
+        g       = self._grid
+        theta   = g.theta.squeeze()
+        dtheta  = np.diff(theta).mean()
+        assert np.allclose(np.diff(theta), dtheta)
+
         # Integrate time series
-        theta     = g.theta.squeeze()
         time      = np.zeros((theta.size, *dt_dtheta.shape[1:]))
         time[1:]  = np.cumsum(dt_dtheta, axis=0)
-        time[1:] *= np.diff(theta)[:, np.newaxis, np.newaxis, np.newaxis, np.newaxis]
+        time[1:] *= dtheta
         time     -= time[theta.searchsorted(0)]
 
-        return dt_dtheta, time
+        return time
 
     @property
     def ifreq_path(self):
