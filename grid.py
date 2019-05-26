@@ -29,6 +29,12 @@ class Grid:
         self._Zs = Zs
         self._R0 = R0
 
+        # Sanity checks
+        assert np.all(np.diff(theta) > 0)
+        assert np.isclose(theta[0], -np.pi)
+        assert np.isclose(theta[-1], np.pi)
+        assert np.isclose(theta[theta.searchsorted(0)], 0)
+
         psi = interp1d(rg, rg/qq).antiderivative()
         psi = psi(rg)
         theta, psi, mu, vpar, = meshgrid(theta, psi, mu, vpar)
