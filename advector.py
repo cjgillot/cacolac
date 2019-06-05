@@ -26,6 +26,7 @@ Future directions:
 
 import numpy as np
 import scipy.optimize
+import scipy.integrate
 from scipy.interpolate import make_interp_spline as interp1d
 
 def double_mesh(array, *, axis):
@@ -170,6 +171,39 @@ class Ptheta:
         self._ener = ener
         self._ltor = ltor
         self._ZAR = grid.Z/grid.A/grid.R0
+
+    def _Ypol(self, psi, theta):
+        """psi_pol = \int q R_0/R dpsi
+
+        Since dpsi/dr = r/q, we get
+            psi_pol(r) = \int r R_0/R dr
+                       = r/a - ln(1 + a r)/a^2
+            where a = cos(theta)/R_0
+        """
+        g = self._grid
+        r = g.radius_at(psi)
+        a = np.cos(theta)/g.R0
+        ra = r * a
+        Ypol  = np.log(1 + ra) - ra
+        Ypol /= - a**2
+        mask = abs(np.cos(theta)) < 1e-6
+        mask = mask.squeeze()
+        Ypol[mask] = r[mask]**2 / 2
+        return Ypol
+
+    def value(self, psi, theta):
+        """Derivative wrt. psi."""
+        g = self._grid
+
+        r = g.radius_at(psi)
+        q = g.qprofile_at(psi)
+        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+
+        U = self._ZAR * (self._ltor - psi)
+        H = g.A/g.R0 * r**2/(q * Rred)
+        Y = self._Ypol(psi, theta)
+
+        return U * H - g.Z * Y
 
     def dpsi(self, psi, theta):
         """Derivative wrt. psi."""
@@ -437,6 +471,27 @@ class ParticleAdvector:
         self._bounce_time *= sign
         self._bounce_phi  *= sign
 
+    def compute_canon(self):
+        """Compute ballooning momentum."""
+        g = self._grid
+        theta = g.theta
+        dtheta = 2*np.pi/(theta.size-1)
+        assert theta.size & 1 == 1
+        assert np.allclose(np.diff(theta), dtheta)
+
+        # Poloidal momentum computation
+        ptheta = Ptheta(self._grid, self._ener, self._ltor)
+        P  = ptheta.value(self._psi, theta)
+        P *= self.living_path(theta.squeeze())[..., np.newaxis]
+
+        J2 = scipy.integrate.simps(
+            P, dx=dtheta, axis=0
+        )
+        J2[self._trapped, 0] -= J2[self._trapped, 1]
+        J2[self._trapped, 1]  = J2[self._trapped, 0]
+        self._banana_momentum = J2
+        self._banana_angle = 2 * np.pi * self._time / self._bounce_time
+
     def _regularize_trapped(self, theta, dt_dtheta):
         """Trapped trajectories need some regularisation near the banana tips.
         """
@@ -587,6 +642,19 @@ def main():
     plt.plot(
         theta,
         phi[:, 16].reshape(theta.size, -1),
+    )
+    plt.show()
+
+    adv.compute_canon()
+    np.who(adv.__dict__)
+
+    idx = np.argsort(vpar.T.ravel())
+
+    plt.figure()
+    plt.subplot(121)
+    plt.plot(
+        vpar.T.ravel()[idx],
+        adv._banana_momentum.T.reshape(vpar.size, -1)[idx],
     )
     plt.show()
 
