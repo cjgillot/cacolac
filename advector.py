@@ -51,11 +51,10 @@ class Energy:
 
     We also provide derivatives wrt. the variables to solve equations.
     """
-    def __init__(self, grid, pot, ener, ltor):
+    def __init__(self, grid, pot, ltor):
         """Constructor."""
         self._grid = grid
         self._pot = pot
-        self._ener = ener
         self._ltor = ltor
         self._ZAR = grid.Z/grid.A/grid.R0
 
@@ -66,7 +65,7 @@ class Energy:
         Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
         U = self._ZAR * (self._ltor - psi)
         P = self._pot(psi)
-        E = g.A/2 * U**2 / Rred**2 + g.mu / Rred + g.Z * P - self._ener
+        E = g.A/2 * U**2 / Rred**2 + g.mu / Rred + g.Z * P
 
         return E
 
@@ -165,10 +164,9 @@ class Ptheta:
 
     We also provide derivatives wrt. the variables to solve equations.
     """
-    def __init__(self, grid, ener, ltor):
+    def __init__(self, grid, ltor):
         """Constructor."""
         self._grid = grid
-        self._ener = ener
         self._ltor = ltor
         self._ZAR = grid.Z/grid.A/grid.R0
 
@@ -320,20 +318,28 @@ class ParticleAdvector:
 
         computer = Energy(
             self._grid,
-            self._pot, self._ener, self._ltor,
+            self._pot, self._ltor,
         )
+
+        ener = self._ener[trapped, 0][:, np.newaxis]
+        shape = np.r_[1, trapped.shape, 2]
+
+        def sel(a):
+            a = np.broadcast_to(a, shape)
+            return a
 
         # Compute banana tip by Newton iteration
         for _ in range(10):
-            val      = computer.value     (psi, tht)[:, trapped]
-            dpsi     = computer.dpsi      (psi, tht)[:, trapped]
+            val   = sel(computer.value(psi, tht))[:, trapped]
+            val  -= ener
+            dpsi  = sel(computer.dpsi (psi, tht))[:, trapped]
 
             if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
                 break
 
-            dtht     = computer.dtheta    (psi, tht)[:, trapped]
-            dpsidpsi = computer.dpsidpsi  (psi, tht)[:, trapped]
-            dpsidtht = computer.dpsidtheta(psi, tht)[:, trapped]
+            dtht     = sel(computer.dtheta    (psi, tht))[:, trapped]
+            dpsidpsi = sel(computer.dpsidpsi  (psi, tht))[:, trapped]
+            dpsidtht = sel(computer.dpsidtheta(psi, tht))[:, trapped]
 
             # Error and jacobian
             vec = np.empty((*val.shape, 2))
@@ -386,10 +392,11 @@ class ParticleAdvector:
         living = self.living_path(theta.squeeze())[..., np.newaxis]
 
         # Compute energy and psi-derivative
-        computer = Energy(self._grid, self._pot, self._ener, self._ltor)
+        computer = Energy(self._grid, self._pot, self._ltor)
         def fval(psi):
             psi = psi.reshape(shape)
             ret = computer.value(psi, theta)
+            ret-= self._ener
             ret*= living
             return ret.ravel()
         def fprime(psi):
@@ -435,12 +442,12 @@ class ParticleAdvector:
         theta = .5 * (theta[1:] + theta[:-1])
 
         # Energy computation
-        energy = Energy(self._grid, self._pot, self._ener, self._ltor)
+        energy = Energy(self._grid, self._pot, self._ltor)
         dE_dy = energy.dpsi(self._mid_psi, theta)
         dE_dl = energy.dltor(self._mid_psi, theta)
 
         # Poloidal momentum computation
-        ptheta = Ptheta(self._grid, self._ener, self._ltor)
+        ptheta = Ptheta(self._grid, self._ltor)
         dP_dy = ptheta.dpsi(self._mid_psi, theta)
         dP_dl = ptheta.dltor(self._mid_psi, theta)
 
@@ -480,7 +487,7 @@ class ParticleAdvector:
         assert np.allclose(np.diff(theta), dtheta)
 
         # Poloidal momentum computation
-        ptheta = Ptheta(self._grid, self._ener, self._ltor)
+        ptheta = Ptheta(self._grid, self._ltor)
         P  = ptheta.value(self._psi, theta)
         P *= self.living_path(theta.squeeze())[..., np.newaxis]
 
