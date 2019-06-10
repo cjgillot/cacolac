@@ -149,7 +149,7 @@ class Energy:
             - 2 * g.A * U * dU_dy * dRr_dj/Rred**3
             + 3 * g.A * U**2 * dRr_dy * dRr_dj/Rred**4
             - g.A * U**2 * d2Rr_dydj/Rred**3
-            + 2 * g.mu * dRr_dy/Rred**3
+            + 2 * g.mu * dRr_dy * dRr_dj/Rred**3
             - g.mu * d2Rr_dydj/Rred**2
         )
         return d2E_dydj
