@@ -1,6 +1,7 @@
 """Grid class for cacolac."""
 
 import numpy as np
+import scipy.integrate
 from scipy.interpolate import make_interp_spline as interp1d
 
 import matplotlib as mpl
@@ -35,8 +36,8 @@ class Grid:
         assert np.isclose(theta[-1], np.pi)
         assert np.isclose(theta[theta.searchsorted(0)], 0)
 
-        psi = interp1d(rg, rg/qq).antiderivative()
-        psi = psi(rg)
+        psi = np.full_like(rg, .5*rg[0]**2/qq[0])
+        psi[1:] += scipy.integrate.cumtrapz(rg/qq, rg)
         s_psi = np.sqrt(psi)
 
         self._r_at = interp1d(s_psi, rg)
