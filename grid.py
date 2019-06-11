@@ -39,7 +39,6 @@ class Grid:
         psi = psi(rg)
         theta, psi, mu, vpar, = meshgrid(theta, psi, mu, vpar)
         rg = rg.reshape(psi.shape)
-        Rred = 1 + rg/R0 * np.cos(theta)
 
         self._r = rg
         self._y = psi
@@ -94,6 +93,27 @@ class Grid:
     @property
     def sign(self):
         return self._spar
+
+    @property
+    def Rred(self):
+        return 1 + self._r/self._R0 * np.cos(self._theta)
+
+    @property
+    def Rred_LFS(self):
+        return 1 + self._r/self._R0
+
+    def Rred_at(self, psi, theta, dy=0, dj=0):
+        if dj & 1 == 0:
+            t = np.cos(theta)
+        else:
+            t = - np.sin(theta)
+        if dj & 2 == 1:
+            t *= -1
+        r = self._r_at(psi, nu=dy)
+        Rred = r/self._R0 * t
+        if dy == 0 and dj == 0:
+            Rred += 1
+        return Rred
 
     def radius_at(self, y, nu=0):
         return self._r_at(y, nu=nu)

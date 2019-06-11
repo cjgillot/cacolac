@@ -62,7 +62,7 @@ class Energy:
         """Compute energy."""
         g = self._grid
 
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
         U = self._ZAR * (self._ltor - psi)
         P = self._pot(psi)
         E = g.A/2 * U**2 / Rred**2 + g.mu / Rred + g.Z * P
@@ -73,8 +73,8 @@ class Energy:
         """Derivative wrt. psi."""
         g = self._grid
 
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
-        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
+        dRr_dy = g.Rred_at(psi, theta, dy=1)
 
         U = self._ZAR * (self._ltor - psi)
         dU_dy = - self._ZAR
@@ -91,8 +91,8 @@ class Energy:
         """Derivative wrt. theta."""
         g = self._grid
 
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
-        dRr_dj = - g.radius_at(psi)/g.R0 * np.sin(theta)
+        Rred = g.Rred_at(psi, theta)
+        dRr_dj = g.Rred_at(psi, theta, dj=1)
 
         U = self._ZAR * (self._ltor - psi)
         dE_dj = (
@@ -105,7 +105,7 @@ class Energy:
         """Derivative wrt. ltor."""
         g = self._grid
 
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
 
         U = self._ZAR * (self._ltor - psi)
         dU_dl = self._ZAR
@@ -116,9 +116,9 @@ class Energy:
         """Second derivative in psi."""
         g = self._grid
 
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
-        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
-        d2Rr_dydy = g.radius_at(psi, nu=2)/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
+        dRr_dy = g.Rred_at(psi, theta, dy=1)
+        d2Rr_dydy = g.Rred_at(psi, theta, dy=2)
 
         U = self._ZAR * (self._ltor - psi)
         dU_dy = - self._ZAR
@@ -138,10 +138,10 @@ class Energy:
         """Second derivative in psi & theta."""
         g = self._grid
 
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
-        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
-        dRr_dj = - g.radius_at(psi)/g.R0 * np.sin(theta)
-        d2Rr_dydj = - g.radius_at(psi, nu=1)/g.R0 * np.sin(theta)
+        Rred = g.Rred_at(psi, theta)
+        dRr_dy = g.Rred_at(psi, theta, dy=1)
+        dRr_dj = g.Rred_at(psi, theta, dj=1)
+        d2Rr_dydj = g.Rred_at(psi, theta, dy=1, dj=1)
 
         U = self._ZAR * (self._ltor - psi)
         dU_dy = - self._ZAR
@@ -195,7 +195,7 @@ class Ptheta:
 
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
 
         U = self._ZAR * (self._ltor - psi)
         H = g.A/g.R0 * r**2/(q * Rred)
@@ -209,8 +209,9 @@ class Ptheta:
 
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
-        dRr_dy = g.radius_at(psi, nu=1)/g.R0 * np.cos(theta)
+
+        Rred = g.Rred_at(psi, theta)
+        dRr_dy = g.Rred_at(psi, theta, dy=1)
 
         U = self._ZAR * (self._ltor - psi)
         dU_dy = - self._ZAR
@@ -231,7 +232,7 @@ class Ptheta:
 
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
-        Rred = 1 + g.radius_at(psi)/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
 
         dU_dl = self._ZAR
 
@@ -258,11 +259,11 @@ class ParticleAdvector:
         A = g.A; Z = g.Z; R0 = g.R0
         shape = np.broadcast(g.psi, g.vpar, g.mu).shape
 
-        Rred = 1 + g.radius/R0
+        Rred = g.Rred_LFS
         ener = A/2 * g.vpar**2 + g.mu/Rred + Z * self._pot(g.psi)
         del Rred
 
-        Rred  = 1 + g.radius/R0 * np.cos(g.theta)
+        Rred  = g.Rred
         vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
         vpar0 = g.sign * np.sqrt(2/A * vp2.clip(0, None))
 
@@ -418,8 +419,7 @@ class ParticleAdvector:
         assert np.all(np.isfinite(psi))
 
         # Compute trajectory
-        r    = g.radius_at(psi)
-        Rred = 1 + r/g.R0 * np.cos(theta)
+        Rred = g.Rred_at(psi, theta)
         vpar = (self._ltor - psi) * g.Z/g.A/g.R0 / Rred
         assert np.all(np.isfinite(vpar))
 
