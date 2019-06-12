@@ -37,8 +37,14 @@ class Grid:
 
         psi = interp1d(rg, rg/qq).antiderivative()
         psi = psi(rg)
-        theta, psi, mu, vpar, = meshgrid(theta, psi, mu, vpar)
-        rg = rg.reshape(psi.shape)
+        s_psi = np.sqrt(psi)
+
+        self._r_at = interp1d(s_psi, rg)
+        self._q_at = interp1d(s_psi, qq)
+
+        theta, rg, mu, vpar, = meshgrid(theta, rg, mu, vpar)
+        psi = psi.reshape(rg.shape)
+        s_psi = s_psi.reshape(rg.shape)
 
         self._r = rg
         self._y = psi
@@ -50,9 +56,6 @@ class Grid:
             self._spar = np.sign(vpar)
         self._mu = mu
         self._q = qq[..., np.newaxis, np.newaxis, np.newaxis]
-
-        self._r_at = interp1d(psi.squeeze(), rg.squeeze())
-        self._q_at = interp1d(psi.squeeze(), qq.squeeze())
 
     @property
     def A(self):
@@ -102,24 +105,34 @@ class Grid:
     def Rred_LFS(self):
         return 1 + self._r/self._R0
 
-    def Rred_at(self, psi, theta, dy=0, dj=0):
+    def Rred_at(self, psi, theta, ds=0, dy=0, dj=0):
         if dj & 1 == 0:
             t = np.cos(theta)
         else:
             t = - np.sin(theta)
         if dj & 2 == 1:
             t *= -1
-        r = self._r_at(psi, nu=dy)
+        r = self.radius_at(psi, nu=dy, ds=ds)
         Rred = r/self._R0 * t
-        if dy == 0 and dj == 0:
+        if dy == 0 and ds == 0 and dj == 0:
             Rred += 1
         return Rred
 
-    def radius_at(self, y, nu=0):
-        return self._r_at(y, nu=nu)
+    def radius_at(self, psi, nu=0, ds=0):
+        assert np.all(np.isfinite(psi))
+        assert np.all(psi >= 0)
+        s_psi = np.sqrt(psi)
+        r = self._r_at(s_psi, nu=nu+ds)
+        r*= (2 * s_psi + 1e-8)**(-nu)
+        return r
 
-    def qprofile_at(self, y, nu=0):
-        return self._q_at(y, nu=nu)
+    def qprofile_at(self, psi, nu=0, ds=0):
+        assert np.all(np.isfinite(psi))
+        assert np.all(psi >= 0)
+        s_psi = np.sqrt(psi)
+        r = self._q_at(s_psi, nu=nu+ds)
+        r*= (2 * s_psi + 1e-8)**(-nu)
+        return r
 
 def main():
     A = Z = 1

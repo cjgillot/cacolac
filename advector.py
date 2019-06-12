@@ -285,6 +285,7 @@ class ParticleAdvector:
         self._ltor = ltor.squeeze(axis=0)
         self._trapped = trapped[..., 0]
 
+        np.clip(psi0, 0, None, out=psi0)
         self._psi = psi0
 
     def compute_bounce_point(self):
@@ -395,6 +396,7 @@ class ParticleAdvector:
         # Compute energy and psi-derivative
         computer = Energy(self._grid, self._pot, self._ltor)
         def fval(psi):
+            np.clip(psi, 0, None, out=psi)
             psi = psi.reshape(shape)
             ret = computer.value(psi, theta)
             ret-= self._ener
@@ -410,12 +412,15 @@ class ParticleAdvector:
             return ret.ravel()
 
         # Find level line
+        assert np.all(psi0 >= 0)
         psi  = scipy.optimize.zeros.newton(
             func=fval, fprime=fprime, fprime2=fsecond,
             x0=psi0.copy().ravel(),
             maxiter=10, tol=1e-6,
         )
+        np.clip(psi, 0, None, out=psi)
         psi  = psi.reshape(shape)
+        assert np.all(psi0 >= 0)
         assert np.all(np.isfinite(psi))
 
         # Compute trajectory
