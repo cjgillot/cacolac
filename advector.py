@@ -341,16 +341,13 @@ class ParticleAdvector:
             val   = sel(computer.value(psi, tht))[:, trapped]
             val  -= ener
             dpsi  = sel(computer.ds   (psi, tht))[:, trapped]
-            dpsi /= 2 * np.sqrt(psi[trapped]) + 1e-8
 
             if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
                 break
 
             dtht     = sel(computer.dtheta    (psi, tht))[:, trapped]
             dpsidpsi = sel(computer.dsds      (psi, tht))[:, trapped]
-            dpsidpsi/= (2 * np.sqrt(psi[trapped]) + 1e-8)**2
             dpsidtht = sel(computer.dsdtheta  (psi, tht))[:, trapped]
-            dpsidtht/= 2 * np.sqrt(psi[trapped]) + 1e-8
 
             # Error and jacobian
             vec = np.empty((*val.shape, 2))
@@ -367,6 +364,9 @@ class ParticleAdvector:
             # Update
             delta = np.linalg.solve(jac, vec)
             assert np.all(np.isfinite(delta))
+
+            # Convert in psi coordinate
+            delta[..., 0] *= 2 * np.sqrt(psi[trapped])
 
             psi[trapped, :] -= delta[..., 0].squeeze(axis=0)
             tht[trapped, :] -= delta[..., 1].squeeze(axis=0)
@@ -404,32 +404,34 @@ class ParticleAdvector:
 
         # Compute energy and psi-derivative
         computer = Energy(self._grid, self._pot, self._ltor)
-        def fval(psi):
-            np.clip(psi, 0, None, out=psi)
+        def fval(s_psi):
+            psi = np.square(s_psi)
             psi = psi.reshape(shape)
             ret = computer.value(psi, theta)
             ret-= self._ener
             ret*= living
             return ret.ravel()
-        def fprime(psi):
+        def fprime(s_psi):
+            psi = np.square(s_psi)
             psi = psi.reshape(shape)
-            ret = computer.ds(psi, theta) / (2 * np.sqrt(psi) + 1e-8)
+            ret = computer.ds(psi, theta)
             return ret.ravel()
-        def fsecond(psi):
+        def fsecond(s_psi):
+            psi = np.square(s_psi)
             psi = psi.reshape(shape)
-            ret = computer.dsds(psi, theta) / (2 * np.sqrt(psi) + 1e-8)**2
+            ret = computer.dsds(psi, theta)
             return ret.ravel()
 
         # Find level line
         assert np.all(psi0 >= 0)
-        psi  = scipy.optimize.zeros.newton(
+        s_psi = scipy.optimize.zeros.newton(
             func=fval, fprime=fprime, fprime2=fsecond,
-            x0=psi0.copy().ravel(),
+            x0=np.sqrt(psi0).ravel(),
             maxiter=10, tol=1e-6,
         )
-        np.clip(psi, 0, None, out=psi)
-        psi  = psi.reshape(shape)
-        assert np.all(psi0 >= 0)
+        psi = np.square(s_psi)
+        psi = psi.reshape(shape)
+        assert np.all(psi >= 0)
         assert np.all(np.isfinite(psi))
 
         # Compute trajectory
