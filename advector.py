@@ -134,25 +134,26 @@ class Energy:
         )
         return d2E_dydy
 
-    def dpsidtheta(self, psi, theta):
-        """Second derivative in psi & theta."""
+    def dsdtheta(self, psi, theta):
+        """Crossed derivative in sqrt(psi) & theta."""
         g = self._grid
 
+        s = np.sqrt(psi)
         Rred = g.Rred_at(psi, theta)
-        dRr_dy = g.Rred_at(psi, theta, dy=1)
+        dRr_ds = g.Rred_at(psi, theta, ds=1)
         dRr_dj = g.Rred_at(psi, theta, dj=1)
-        d2Rr_dydj = g.Rred_at(psi, theta, dy=1, dj=1)
+        d2Rr_dsdj = g.Rred_at(psi, theta, ds=1, dj=1)
 
         U = self._ZAR * (self._ltor - psi)
-        dU_dy = - self._ZAR
-        d2E_dydj = (
-            - 2 * g.A * U * dU_dy * dRr_dj/Rred**3
-            + 3 * g.A * U**2 * dRr_dy * dRr_dj/Rred**4
-            - g.A * U**2 * d2Rr_dydj/Rred**3
-            + 2 * g.mu * dRr_dy * dRr_dj/Rred**3
-            - g.mu * d2Rr_dydj/Rred**2
+        dU_ds = - 2 * s * self._ZAR
+        d2E_dsdj = (
+            - 2 * g.A * U * dU_ds * dRr_dj/Rred**3
+            + 3 * g.A * U**2 * dRr_ds * dRr_dj/Rred**4
+            - g.A * U**2 * d2Rr_dsdj/Rred**3
+            + 2 * g.mu * dRr_ds * dRr_dj/Rred**3
+            - g.mu * d2Rr_dsdj/Rred**2
         )
-        return d2E_dydj
+        return d2E_dsdj
 
 class Ptheta:
     """This class encapsulates the computation of the particle poloidal
@@ -343,7 +344,8 @@ class ParticleAdvector:
 
             dtht     = sel(computer.dtheta    (psi, tht))[:, trapped]
             dpsidpsi = sel(computer.dpsidpsi  (psi, tht))[:, trapped]
-            dpsidtht = sel(computer.dpsidtheta(psi, tht))[:, trapped]
+            dpsidtht = sel(computer.dsdtheta  (psi, tht))[:, trapped]
+            dpsidtht/= 2 * np.sqrt(psi[trapped]) + 1e-8
 
             # Error and jacobian
             vec = np.empty((*val.shape, 2))
