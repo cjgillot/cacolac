@@ -112,27 +112,30 @@ class Energy:
         dE_dl = g.A * U * dU_dl/Rred**2
         return dE_dl
 
-    def dpsidpsi(self, psi, theta):
+    def dsds(self, psi, theta):
         """Second derivative in psi."""
         g = self._grid
 
+        s = np.sqrt(psi)
         Rred = g.Rred_at(psi, theta)
-        dRr_dy = g.Rred_at(psi, theta, dy=1)
-        d2Rr_dydy = g.Rred_at(psi, theta, dy=2)
+        dRr_ds = g.Rred_at(psi, theta, ds=1)
+        d2Rr_dsds = g.Rred_at(psi, theta, ds=2)
 
         U = self._ZAR * (self._ltor - psi)
-        dU_dy = - self._ZAR
-        d2P_dydy = self._pot(psi, nu=2)
-        d2E_dydy = (
-            g.A * dU_dy**2 /Rred**2
-            - 2 * g.A * U * dU_dy * dRr_dy/Rred**3
-            + 3 * g.A * U**2 * dRr_dy**2/Rred**4
-            - g.A * U**2 * d2Rr_dydy/Rred**3
-            + 2 * g.mu * dRr_dy**2/Rred**3
-            - g.mu * d2Rr_dydy/Rred**2
-            + g.Z * d2P_dydy
+        dU_ds = - 2 * s * self._ZAR
+        d2U_dsds = - 2 * self._ZAR
+        d2P_dsds = 4 * psi * self._pot(psi, nu=2) + 2 * self._pot(psi, nu=1)
+        d2E_dsds = (
+            g.A * dU_ds**2 /Rred**2
+            + g.A * U * d2U_dsds /Rred**2
+            - 2 * g.A * U * dU_ds * dRr_ds/Rred**3
+            + 3 * g.A * U**2 * dRr_ds**2/Rred**4
+            - g.A * U**2 * d2Rr_dsds/Rred**3
+            + 2 * g.mu * dRr_ds**2/Rred**3
+            - g.mu * d2Rr_dsds/Rred**2
+            + g.Z * d2P_dsds
         )
-        return d2E_dydy
+        return d2E_dsds
 
     def dsdtheta(self, psi, theta):
         """Crossed derivative in sqrt(psi) & theta."""
@@ -344,7 +347,8 @@ class ParticleAdvector:
                 break
 
             dtht     = sel(computer.dtheta    (psi, tht))[:, trapped]
-            dpsidpsi = sel(computer.dpsidpsi  (psi, tht))[:, trapped]
+            dpsidpsi = sel(computer.dsds      (psi, tht))[:, trapped]
+            dpsidpsi/= (2 * np.sqrt(psi[trapped]) + 1e-8)**2
             dpsidtht = sel(computer.dsdtheta  (psi, tht))[:, trapped]
             dpsidtht/= 2 * np.sqrt(psi[trapped]) + 1e-8
 
@@ -413,7 +417,7 @@ class ParticleAdvector:
             return ret.ravel()
         def fsecond(psi):
             psi = psi.reshape(shape)
-            ret = computer.dpsidpsi(psi, theta)
+            ret = computer.dsds(psi, theta) / (2 * np.sqrt(psi) + 1e-8)**2
             return ret.ravel()
 
         # Find level line
