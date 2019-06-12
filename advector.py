@@ -620,6 +620,13 @@ def main():
     adv.compute_bounce_point()
     np.who(adv.__dict__)
 
+    plt.figure()
+    plt.subplot(121)
+    plt.plot(adv._banana_psi)
+    plt.subplot(122)
+    plt.plot(adv._banana_theta)
+    plt.show()
+
     adv.compute_trajectory()
     np.who(adv.__dict__)
 
