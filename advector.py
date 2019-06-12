@@ -20,8 +20,7 @@ This is done point-by-point by Picard iteration on the solved formulas
 
 This method is computationally cheap and converges relatively quickly.
 
-Future directions:
-    - Newton iteration?
+In all the following, the variable `s_psi` (or `s`) denotes the sqrt of psi.
 """
 
 import numpy as np
@@ -69,23 +68,24 @@ class Energy:
 
         return E
 
-    def dpsi(self, psi, theta):
+    def ds(self, psi, theta):
         """Derivative wrt. psi."""
         g = self._grid
 
+        s = np.sqrt(psi)
         Rred = g.Rred_at(psi, theta)
-        dRr_dy = g.Rred_at(psi, theta, dy=1)
+        dRr_ds = g.Rred_at(psi, theta, ds=1)
 
         U = self._ZAR * (self._ltor - psi)
-        dU_dy = - self._ZAR
-        dP_dy = self._pot(psi, nu=1)
-        dE_dy = (
-            g.A * U * dU_dy/Rred**2
-            - g.A * U**2 * dRr_dy/Rred**3
-            - g.mu * dRr_dy/Rred**2
-            + g.Z * dP_dy
+        dU_ds = - 2 * self._ZAR * s
+        dP_ds = 2 * s * self._pot(psi, nu=1)
+        dE_ds = (
+            g.A * U * dU_ds/Rred**2
+            - g.A * U**2 * dRr_ds/Rred**3
+            - g.mu * dRr_ds/Rred**2
+            + g.Z * dP_ds
         )
-        return dE_dy
+        return dE_ds
 
     def dtheta(self, psi, theta):
         """Derivative wrt. theta."""
@@ -332,9 +332,11 @@ class ParticleAdvector:
 
         # Compute banana tip by Newton iteration
         for _ in range(10):
+            np.clip(psi, 0, None, out=psi)
             val   = sel(computer.value(psi, tht))[:, trapped]
             val  -= ener
-            dpsi  = sel(computer.dpsi (psi, tht))[:, trapped]
+            dpsi  = sel(computer.ds   (psi, tht))[:, trapped]
+            dpsi /= 2 * np.sqrt(psi[trapped]) + 1e-8
 
             if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
                 break
@@ -404,7 +406,7 @@ class ParticleAdvector:
             return ret.ravel()
         def fprime(psi):
             psi = psi.reshape(shape)
-            ret = computer.dpsi(psi, theta)
+            ret = computer.ds(psi, theta) / (2 * np.sqrt(psi) + 1e-8)
             return ret.ravel()
         def fsecond(psi):
             psi = psi.reshape(shape)
@@ -448,7 +450,7 @@ class ParticleAdvector:
 
         # Energy computation
         energy = Energy(self._grid, self._pot, self._ltor)
-        dE_dy = energy.dpsi(self._mid_psi, theta)
+        dE_dy = energy.ds(self._mid_psi, theta) / (2 * np.sqrt(self._mid_psi))
         dE_dl = energy.dltor(self._mid_psi, theta)
 
         # Poloidal momentum computation
