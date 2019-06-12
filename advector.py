@@ -204,28 +204,29 @@ class Ptheta:
 
         return U * H - g.Z * Y
 
-    def dpsi(self, psi, theta):
+    def ds(self, psi, theta):
         """Derivative wrt. psi."""
         g = self._grid
 
+        s = np.sqrt(psi)
         r = g.radius_at(psi)
         q = g.qprofile_at(psi)
 
         Rred = g.Rred_at(psi, theta)
-        dRr_dy = g.Rred_at(psi, theta, dy=1)
+        dRr_ds = g.Rred_at(psi, theta, ds=1)
 
         U = self._ZAR * (self._ltor - psi)
-        dU_dy = - self._ZAR
+        dU_ds = - 2 * s * self._ZAR
 
         H = g.A/g.R0 * r**2/(q * Rred)
-        dH_dy = (
-            2 * g.radius_at(psi, nu=1)
-            - r * g.qprofile_at(psi, nu=1)/q
-            - r * dRr_dy/Rred
+        dH_ds = (
+            2 * g.radius_at(psi, ds=1)
+            - r * g.qprofile_at(psi, ds=1)/q
+            - r * dRr_ds/Rred
         ) * g.A/g.R0 * r/(q * Rred)
 
-        dPtheta_dy = dU_dy * H + U * dH_dy - g.Z * q
-        return dPtheta_dy
+        dPtheta_ds = dU_ds * H + U * dH_ds - 2 * g.Z * s * q
+        return dPtheta_ds
 
     def dltor(self, psi, theta):
         """Derivative wrt. ltor."""
@@ -452,16 +453,16 @@ class ParticleAdvector:
 
         # Energy computation
         energy = Energy(self._grid, self._pot, self._ltor)
-        dE_dy = energy.ds(self._mid_psi, theta) / (2 * np.sqrt(self._mid_psi))
+        dE_ds = energy.ds(self._mid_psi, theta)
         dE_dl = energy.dltor(self._mid_psi, theta)
 
         # Poloidal momentum computation
         ptheta = Ptheta(self._grid, self._ltor)
-        dP_dy = ptheta.dpsi(self._mid_psi, theta)
+        dP_ds = ptheta.ds(self._mid_psi, theta)
         dP_dl = ptheta.dltor(self._mid_psi, theta)
 
         # Time displacement
-        dt_dtheta = dP_dy / dE_dy
+        dt_dtheta = dP_ds / dE_ds
         dt_dtheta = self._regularize_trapped(theta, dt_dtheta)
         self._dt_dtheta = dt_dtheta
         self._time = self._integrate_theta(dt_dtheta)
