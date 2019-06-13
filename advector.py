@@ -694,7 +694,7 @@ class ParticleAdvector:
         uptip   = self._banana_theta[..., 0]
         dwtip   = self._banana_theta[..., 1]
         trapped = self._trapped
-        living  = np.empty(theta.shape + trapped.shape)
+        living  = np.empty(theta.shape + trapped.shape, dtype=bool)
         living[:]          = ~trapped
         living[:, trapped] = (
             np.less.outer(theta, uptip) &
@@ -766,38 +766,53 @@ def main():
     np.who(adv.__dict__)
 
     plt.figure()
+    plt.suptitle('Banana tip')
     plt.subplot(121)
-    plt.plot(adv._banana_psi)
+    plt.gca().set_title('psi')
+    plt.plot(adv._banana_psi[:, 0])
+    plt.xlabel('trapped index')
     plt.subplot(122)
-    plt.plot(adv._banana_theta)
+    plt.gca().set_title('theta')
+    plt.plot(adv._banana_theta[:, 0])
+    plt.xlabel('trapped index')
     plt.show()
 
     adv.compute_trajectory()
     np.who(adv.__dict__)
 
     plt.figure()
+    plt.suptitle('Trajectory')
     plt.subplot(121)
-    plt.plot(theta, adv.psi_path[:, 16].reshape(theta.size, -1))
+    plt.gca().set_title('psi')
+    plt.plot(theta, adv.psi_path[:, 3].reshape(theta.size, -1))
     plt.subplot(122)
-    plt.plot(theta, adv.vpar_path[:, 16].reshape(theta.size, -1))
+    plt.gca().set_title('vpar')
+    plt.plot(theta, adv.vpar_path[:, 3].reshape(theta.size, -1))
     plt.show()
 
     # Compute trajectory timing
     adv.compute_displacement()
     adv.compute_precession()
+    adv.compute_ballooning()
     np.who(adv.__dict__)
 
-    living = 1/adv.living_path(theta)[..., np.newaxis]
+    living = np.where(
+        adv.living_path(theta)[..., np.newaxis],
+        1, np.nan
+    )
     time = adv.time_path * living
-    phi  = adv.phi_path  * living
+    phi  = adv._trans  * living
 
     plt.figure()
+    plt.suptitle('Displacement')
     plt.subplot(121)
+    plt.gca().set_title('time')
     plt.plot(
         theta,
         time[:, 16].reshape(theta.size, -1),
     )
     plt.subplot(122)
+    plt.gca().set_title('phi')
     plt.plot(
         theta,
         phi[:, 16].reshape(theta.size, -1),
@@ -815,20 +830,42 @@ def main():
         vpar.T.ravel()[idx],
         adv._banana_momentum.T.reshape(vpar.size, -1)[idx],
     )
+    plt.subplot(122)
+    plt.plot(
+        vpar.T.ravel()[idx],
+        (
+            adv._banana_momentum
+            + grid.Z * (
+                grid.qprofile * adv._ltor
+                + rg[0]**2/2
+            )
+        ).T.reshape(vpar.size, -1)[idx],
+    )
     plt.show()
 
 if __name__ == '__main__':
+    import warnings
+    warnings.filterwarnings('error')
+
     import matplotlib as mpl
     import matplotlib.pyplot as plt
     plt.ion()
 
     mpl.rcParams['figure.figsize'] = 10, 5
 
+    import cProfile, pstats
+    pr = cProfile.Profile()
+
     try:
+        pr.enable()
         main()
+        pr.disable()
     except Exception as e:
         import traceback
         print(traceback.format_exc())
         raise
     finally:
+        ps = pstats.Stats(pr).sort_stats('cumulative')
+        ps.print_stats(10)
+
         plt.show(block=True)
