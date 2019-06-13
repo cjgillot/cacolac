@@ -23,6 +23,8 @@ This method is computationally cheap and converges relatively quickly.
 In all the following, the variable `s_psi` (or `s`) denotes the sqrt of psi.
 """
 
+import warnings
+
 import numpy as np
 import scipy.optimize
 import scipy.integrate
@@ -358,14 +360,16 @@ class ParticleAdvector:
         psi  = np.empty(shape)
         tht  = np.empty(shape)
 
-        # Initial guess for banana tip: where vpar==0
-        psi[:] = g.psi.squeeze(axis=0)
-        tht[:] = np.arccos(
-            g.R0 / g.radius_at(g.psi) * (
-                g.mu / (self._ener - g.Z * self._pot(g.psi)) - 1
-            )
-        ).squeeze(axis=0)
-        np.negative(tht[..., 1], out=tht[..., 1])
+        with warnings.catch_warnings():
+            # We rely on `nan`s to find trapped and passing particles
+            warnings.simplefilter('ignore', RuntimeWarning)
+            psi[:] = g.psi.squeeze(axis=0)
+            tht[:] = np.arccos(
+                g.R0 / g.radius_at(g.psi) * (
+                    g.mu / (self._ener - g.Z * self._pot(g.psi)) - 1
+                )
+            ).squeeze(axis=0)
+            np.negative(tht[..., 1], out=tht[..., 1])
 
         # Compare two definitions of trapped particles
         trapped  = np.isfinite(tht).all(axis=-1)
@@ -523,6 +527,7 @@ class ParticleAdvector:
             psi = np.square(s_psi)
             psi = psi.reshape(shape)
             ret = computer.ds(psi, theta)
+            assert np.all(np.isfinite(ret))
             return ret.ravel()
         def fsecond(s_psi):
             psi = np.square(s_psi)
