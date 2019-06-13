@@ -268,30 +268,69 @@ class ParticleAdvector:
         ener = A/2 * g.vpar**2 + g.mu/Rred + Z * self._pot(g.psi)
         del Rred
 
-        Rred  = g.Rred
-        vp2   = ener - g.mu/Rred - Z * self._pot(g.psi)
-        vpar0 = g.sign * np.sqrt(2/A * vp2.clip(0, None))
-
-        trapped = vp2.min(axis=0) < 0
-        assert np.all(trapped[..., 0] == trapped[..., 1])
-
-        dRv0  = Rred * vpar0
-        psi0  = g.psi - A/Z * R0 * dRv0
-
         # We do not use a fancy trick here to have ltor closer to psi.
         # Doing so would mess up the computation of the velocity,
         # which is required everywhere in Energy and Ptheta.
         # FIXME Find a way for `g.psi` to be a grid in `psibar = <psi(theta)>`
         # instead of a grid in `ltor`.
         ltor = g.psi
-        assert np.allclose(vpar0, Z/A/R0 * (ltor - psi0) / Rred)
 
         self._ener = ener.squeeze(axis=0)
         self._ltor = ltor.squeeze(axis=0)
-        self._trapped = trapped[..., 0]
 
-        np.clip(psi0, 0, None, out=psi0)
-        self._psi = psi0
+    def _lowest_energy(self):
+        """
+        This method computes the lowest energy of a particle to pass
+        high-field-side, parametrized by:
+        - the average position `psi` ;
+        - the parallel velocity `vpar` ;
+        - the magnetic momentum `mu`.
+
+        It is defined as the level lines of the energy as a function of mu and
+        ltor. Those are found by Newton iteration.
+        """
+        g = self._grid
+
+        # Search array shape, and mask of searched points.
+        shape = np.broadcast(self._ltor, g.mu).shape
+        theta = np.pi
+        psi0  = np.broadcast_to(g.psi, shape)
+
+        # Compute energy and psi-derivative
+        computer = Energy(self._grid, self._pot, self._ltor)
+        def fval(s_psi):
+            psi = np.square(s_psi)
+            psi = psi.reshape(shape)
+            ret = computer.value(psi, theta)
+            return ret.sum()
+        def fprime(s_psi):
+            psi = np.square(s_psi)
+            psi = psi.reshape(shape)
+            ret = computer.ds(psi, theta)
+            ret += 1e3 * np.clip(psi, None, 0)
+            ret += 1e3 * np.clip(psi - g.psimax, 0, None)
+            return ret.ravel()
+
+        # Find level line
+        res = scipy.optimize.minimize(
+            fun=fval, jac=fprime,
+            x0=np.sqrt(psi0).ravel(),
+            bounds=scipy.optimize.Bounds(
+                np.sqrt(g.psimin)+1e-8,
+                np.sqrt(g.psimax)
+            ),
+            method='L-BFGS-B',
+            tol=1e-18,
+        )
+        res_x = res.x
+        assert np.all(np.isfinite(res_x))
+        np.square(res_x, out=res_x)
+
+        # Minimal energy
+        psi_min = res_x.reshape(shape).squeeze(axis=0)
+        ener_min = computer.value(psi_min, theta).squeeze(axis=0)
+
+        return psi_min, ener_min
 
     def compute_bounce_point(self):
         """
@@ -305,8 +344,17 @@ class ParticleAdvector:
         and defined as `E = E_0` and `dE_dy = 0`.
         """
         g = self._grid
+
+        # The last axis (sign) is used to find the point for negative theta.
         shape = np.broadcast(g.psi, g.vpar, g.mu).shape[1:]
 
+        # Compute particle trappedness
+        psi_min, ener_min = self._lowest_energy()
+        trapped = self._ener < ener_min
+        assert np.all(trapped[..., 0] == trapped[..., 1])
+        self._trapped = trapped[..., 0]
+
+        # Initial guess for banana tip: where vpar==0
         psi  = np.empty(shape)
         tht  = np.empty(shape)
 
@@ -320,16 +368,24 @@ class ParticleAdvector:
         np.negative(tht[..., 1], out=tht[..., 1])
 
         # Compare two definitions of trapped particles
-        trapped = np.isfinite(tht).all(axis=-1)
-        assert not np.any(trapped ^ self._trapped)
+        trapped  = np.isfinite(tht).all(axis=-1)
+        # Minimal energy definition is more restrictive
+        trapped &= self._trapped
 
         computer = Energy(
             self._grid,
             self._pot, self._ltor,
         )
+        assert not np.any(trapped ^ self._trapped)
+
+        # Sanitize input for solver
+        tht[~trapped] = 0
 
         ener = self._ener[trapped, 0][:, np.newaxis]
         shape = np.r_[1, trapped.shape, 2]
+
+        relevant    = np.ones(shape[1:], dtype=bool)
+        relevant[:] = trapped[..., np.newaxis]
 
         def sel(a):
             a = np.broadcast_to(a, shape)
@@ -338,16 +394,26 @@ class ParticleAdvector:
         # Compute banana tip by Newton iteration
         for _ in range(10):
             np.clip(psi, 0, None, out=psi)
+            assert np.all(np.isfinite(psi))
+            assert np.all(np.isfinite(tht))
+
             val   = sel(computer.value(psi, tht))[:, trapped]
             val  -= ener
             dpsi  = sel(computer.ds   (psi, tht))[:, trapped]
 
-            if np.all(abs(val) < 1e-6) and np.all(abs(dpsi) < 1e-6):
+            relevant[trapped] &= (
+                (abs(val) > 1e-12) |
+                (abs(dpsi) > 1e-12)
+            ).squeeze(axis=0)
+
+            if not np.any(relevant):
                 break
 
-            dtht     = sel(computer.dtheta    (psi, tht))[:, trapped]
-            dpsidpsi = sel(computer.dsds      (psi, tht))[:, trapped]
-            dpsidtht = sel(computer.dsdtheta  (psi, tht))[:, trapped]
+            val      = val [:, relevant[trapped]]
+            dpsi     = dpsi[:, relevant[trapped]]
+            dtht     = sel(computer.dtheta    (psi, tht))[:, relevant]
+            dpsidpsi = sel(computer.dsds      (psi, tht))[:, relevant]
+            dpsidtht = sel(computer.dsdtheta  (psi, tht))[:, relevant]
 
             # Error and jacobian
             vec = np.empty((*val.shape, 2))
@@ -366,13 +432,25 @@ class ParticleAdvector:
             assert np.all(np.isfinite(delta))
 
             # Convert in psi coordinate
-            delta[..., 0] *= 2 * np.sqrt(psi[trapped])
+            delta[..., 0] *= 2 * np.sqrt(psi[relevant])
 
-            psi[trapped, :] -= delta[..., 0].squeeze(axis=0)
-            tht[trapped, :] -= delta[..., 1].squeeze(axis=0)
+            psi[relevant] -= delta[..., 0].squeeze(axis=0)
+            tht[relevant] -= delta[..., 1].squeeze(axis=0)
 
             if np.all(abs(delta) < 1e-6):
                 break
+
+        else:
+            warnings.warn(
+                "Failed to converge in 10 iterations.",
+                RuntimeWarning,
+            )
+            pass
+
+        # Wrap between -pi and pi
+        tht += np.pi
+        tht %= 2 * np.pi
+        tht -= np.pi
 
         self._banana_psi   = psi[trapped]
         self._banana_theta = tht[trapped]
