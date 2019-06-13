@@ -377,6 +377,33 @@ class ParticleAdvector:
         self._banana_psi   = psi[trapped]
         self._banana_theta = tht[trapped]
 
+    def _init_trajectory(self):
+        """Simple initialisation of the particle trajectory:
+            - circular for passing particles
+            - ltor +- sqrt(E - mu B) for trapped particles
+        """
+        g = self._grid
+
+        shape   = np.broadcast(g.Rred, self._ener, self._ltor).shape
+        psi0    = np.empty(shape)
+        psi0[:] = g.psi
+        psi0[:, self._trapped] = self._banana_psi.mean(axis=-1)[:, np.newaxis]
+
+        # Parallel velocity and banana width
+        Rred  = g.Rred_at(psi0, g.theta)
+        vp2   = self._ener - g.mu/Rred - g.Z * self._pot(psi0)
+        vpar0 = g.sign * np.sqrt(2/g.A * vp2.clip(0, None))
+        dRv0  = Rred * vpar0
+        dRv0 *= self.living_path(g.theta.squeeze())[..., np.newaxis]
+        psi0 -= g.A/g.Z * g.R0 * dRv0
+
+        # Compute passage of the central point r=0
+        ener_r0 = (.5 * g.Z**2/g.A/g.R0**2) * self._ltor**2 + g.mu + g.Z * self._pot(0)
+        self._dead = np.any(psi0 <= 0, axis=0) & (self._ener > ener_r0)
+        np.clip(psi0, 0, None, out=psi0)
+
+        return psi0
+
     def compute_trajectory(self):
         """
         This method computes the path of a trapped or passing particle.
@@ -392,15 +419,18 @@ class ParticleAdvector:
         """
         g = self._grid
 
+        psi0  = self._init_trajectory()
+
         # Use a twice refined grid for path computation.
         # Regular points are used for trajectory,
         # staggered points are used for velocities.
         theta = double_mesh(g.theta, axis=0)
-        psi0  = double_mesh(self._psi, axis=0)
+        psi0  = double_mesh(psi0, axis=0)
 
         # Search array shape, and mask of searched points.
         shape  = np.broadcast(g.psi, theta, g.vpar, g.mu).shape
-        living = self.living_path(theta.squeeze())[..., np.newaxis]
+        dead   = ~self.living_path(theta.squeeze())
+        dead   = dead[..., np.newaxis] | self._dead
 
         # Compute energy and psi-derivative
         computer = Energy(self._grid, self._pot, self._ltor)
@@ -409,7 +439,7 @@ class ParticleAdvector:
             psi = psi.reshape(shape)
             ret = computer.value(psi, theta)
             ret-= self._ener
-            ret*= living
+            ret[dead] = 0
             return ret.ravel()
         def fprime(s_psi):
             psi = np.square(s_psi)
