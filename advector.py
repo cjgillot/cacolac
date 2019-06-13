@@ -607,24 +607,40 @@ class ParticleAdvector:
         self._bounce_time *= sign
         self._bounce_phi  *= sign
 
+    def compute_ballooning(self):
+        g = self._grid
+        epsilon = g.radius_at(g.psi)/g.R0
+        frac = np.sqrt((1 - epsilon) / (1 + epsilon))
+
+        thetastar  = np.tan(g.theta/2)
+        thetastar  = frac * thetastar
+        thetastar  = np.arctan(thetastar)
+        thetastar *= 2
+
+        q  = g.qprofile_at(g.psi)
+        q /= np.sqrt(1 - epsilon**2)
+
+        self._trans = self._phi - q * thetastar
+
     def compute_canon(self):
         """Compute ballooning momentum."""
         g = self._grid
         theta = g.theta
-        dtheta = 2*np.pi/(theta.size-1)
         assert theta.size & 1 == 1
-        assert np.allclose(np.diff(theta), dtheta)
+        assert np.allclose(np.diff(theta), 2*np.pi/(theta.size-1))
+
+        L = self.living_path(theta.squeeze())[..., np.newaxis]
 
         # Poloidal momentum computation
         ptheta = Ptheta(self._grid, self._ltor)
         P  = ptheta.value(self._psi, theta)
-        P *= self.living_path(theta.squeeze())[..., np.newaxis]
+        P *= L
 
-        J2 = scipy.integrate.simps(
-            P, dx=dtheta, axis=0
-        )
+        J2  = scipy.integrate.simps(P, dx=1, axis=0)
+        J2 /= L.sum(axis=0)
         J2[self._trapped, 0] -= J2[self._trapped, 1]
         J2[self._trapped, 1]  = J2[self._trapped, 0]
+
         self._banana_momentum = J2
         self._banana_angle = 2 * np.pi * self._time / self._bounce_time
 
